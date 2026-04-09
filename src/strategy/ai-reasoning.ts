@@ -67,7 +67,7 @@ async function tryGroq(prompt: string): Promise<string | null> {
         'Authorization': `Bearer ${config.groqApiKey}`,
       },
       body: JSON.stringify({
-        model: 'llama-3.1-8b-instant',
+        model: 'qwen/qwen3-32b',
         max_tokens: 200,
         temperature: 0.3,
         messages: [{ role: 'user', content: prompt }],
