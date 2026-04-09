@@ -73,6 +73,8 @@ import {
 } from './operator-control.js';
 import { recordTrustObservation } from '../trust/reputation-evolution.js';
 import type { ClosedTrade } from './trade-log.js';
+import type { TradeSignal, Candle } from '../strategy/types.js';
+import type { EnsembleResult } from '../strategy/ensemble.js';
 
 const log = createLogger('AGENT');
 
@@ -182,12 +184,11 @@ async function processSymbol(symbol: string): Promise<void> {
     }
 
     // 2. Oracle integrity guard
-    const prices = candles.map(c => c.close);
-    const highs = candles.map(c => c.high);
-    const lows = candles.map(c => c.low);
-    const timestamps = candles.map(c => new Date(c.time).toISOString());
     const oracleResult = evaluateOracleIntegrity({
-      prices, highs, lows, timestamps,
+      prices:      candles.map(c => c.close),
+      highs:       candles.map(c => c.high),
+      lows:        candles.map(c => c.low),
+      timestamps:  candles.map(c => new Date(c.time).toISOString()),
       externalPrice: ticker?.price ?? null,
     });
 
@@ -196,49 +197,77 @@ async function processSymbol(symbol: string): Promise<void> {
       await saveCheckpoint({ eventType: 'veto', symbol, agentId: config.agentId, signal: 'hold', data: { reason: 'oracle_integrity', blockers: oracleResult.blockers } });
       return;
     }
-
     if (oracleResult.status === 'watch') {
       log.info(`[AGENT] Oracle watch for ${symbol}: ${oracleResult.reasons.join(', ')}`);
     }
 
-    // 3. Ensemble strategy (6 ICT/SMC strategies with priority hierarchy)
+    // 3. Run ALL 6 strategies — collect every one that fires
     const ensembleResult = _ensemble.analyze(candles);
-    let signal = ensembleResult.tradeSignal;
     _totalSignals++;
+    _lastEvaluations = { symbol, evaluations: ensembleResult.strategyEvaluations };
+    log.debug(`[AGENT] ${symbol} scores: ${ensembleResult.strategyEvaluations.map(e => `${e.name}=${(e.confidence*100).toFixed(0)}%`).join(' | ')}`);
 
-    // TEST MODE: inject a synthetic signal when ensemble returns HOLD so the
-    // full downstream pipeline (mandate→sim→supervisory→order→checkpoint) runs.
-    if (config.testMode && signal.direction === 'hold') {
+    let firedSignals: TradeSignal[] = [...ensembleResult.tradeSignals];
+
+    // TEST MODE: inject one synthetic signal when nothing fired
+    if (config.testMode && firedSignals.length === 0) {
       const price = candles.at(-1)!.close;
-      const atr   = price * 0.01; // 1% synthetic ATR
-      signal = {
+      const atr   = price * 0.01;
+      firedSignals = [{
         direction:  'buy',
         confidence: 0.72,
         strategy:   'test_inject',
         price,
         stopLoss:   price - atr * 2,
         takeProfit: price + atr * 3,
-        reasoning:  '[TEST MODE] Synthetic signal — bypasses kill zone for pipeline verification',
+        reasoning:  '[TEST MODE] Synthetic signal',
         regime:     ensembleResult.regimeSignal.regime,
         timestamp:  new Date().toISOString(),
-      };
-      log.warn(`[AGENT] TEST MODE: injected BUY signal for ${symbol} @ ${price.toFixed(2)}`);
+      }];
+      log.warn(`[AGENT] TEST MODE: injected BUY for ${symbol} @ ${price.toFixed(2)}`);
     }
 
-    _lastEvaluations = { symbol, evaluations: ensembleResult.strategyEvaluations };
-    log.debug(`[AGENT] ${symbol} strategy scores: ${ensembleResult.strategyEvaluations.map(e => `${e.name}=${(e.confidence*100).toFixed(0)}%`).join(' | ')}`);
+    if (firedSignals.length === 0) {
+      await saveCheckpoint({ eventType: 'signal', symbol, agentId: config.agentId, signal: 'hold', data: { strategy: 'ensemble' } });
+      return;
+    }
 
-    // 4. Neuro-symbolic reasoning
-    const cognitive = applySymbolicReasoning(signal);
-    signal = cognitive.adjustedSignal;
+    log.info(`[AGENT] ${symbol} — ${firedSignals.length} strategy signal(s) fired: ${firedSignals.map(s => s.strategy).join(', ')}`);
 
-    // 5. Sentiment + PRISM confidence modifiers
+    // Fetch sentiment + PRISM once per symbol (shared across all signals)
     const [sentiment, prism] = await Promise.all([
       fetchSentiment(symbol).catch(() => null),
       fetchPrismData(symbol).catch(() => null),
     ]);
-
     if (sentiment) _lastSentiment = sentiment as unknown as Record<string, unknown>;
+
+    // Execute each strategy's signal independently through the full pipeline
+    for (const rawSignal of firedSignals) {
+      await executeSignal(symbol, rawSignal, candles, ensembleResult, sentiment, prism);
+    }
+
+  } catch (e) {
+    _consecutiveErrors++;
+    log.error(`[AGENT] processSymbol(${symbol}) error: ${e}`);
+  }
+}
+
+// ── Per-signal execution pipeline (stages 4-18) ───────────────────────────────
+
+async function executeSignal(
+  symbol: string,
+  rawSignal: TradeSignal,
+  candles: Candle[],
+  ensembleResult: EnsembleResult,
+  sentiment: Awaited<ReturnType<typeof fetchSentiment>> | null,
+  prism: Awaited<ReturnType<typeof fetchPrismData>> | null,
+): Promise<void> {
+  try {
+    // 4. Neuro-symbolic reasoning
+    const cognitive = applySymbolicReasoning(rawSignal);
+    let signal = cognitive.adjustedSignal;
+
+    // 5. Sentiment + PRISM confidence modifiers
     if (sentiment && Math.abs(sentiment.composite) > 0.6) {
       const boost = sentiment.composite > 0 ? 0.05 : -0.05;
       signal = { ...signal, confidence: Math.min(0.95, signal.confidence + boost) };
@@ -249,46 +278,41 @@ async function processSymbol(symbol: string): Promise<void> {
 
     // 6. Adaptive learning context bias
     const contextBias = getContextConfidenceBias({
-      regime: _mapVolatilityRegime(ensembleResult.regimeSignal?.volatilityRegime),
-      direction: signal.direction === 'sell' ? 'sell' : 'buy',
+      regime:     _mapVolatilityRegime(ensembleResult.regimeSignal?.volatilityRegime),
+      direction:  signal.direction === 'sell' ? 'sell' : 'buy',
       confidence: signal.confidence,
     });
     if (Math.abs(contextBias) > 0.01) {
       signal = { ...signal, confidence: Math.min(0.95, Math.max(0, signal.confidence + contextBias)) };
     }
 
+    if (signal.direction === 'hold') return; // neuro-sym flipped it
+
     recordSignal(symbol, signal.direction);
     log.info(`[AGENT] ${symbol} | ${signal.direction.toUpperCase()} | conf=${(signal.confidence * 100).toFixed(0)}% | ${signal.strategy}`);
 
-    if (signal.direction === 'hold') {
-      await saveCheckpoint({ eventType: 'signal', symbol, agentId: config.agentId, signal: 'hold', data: { strategy: signal.strategy } });
-      return;
-    }
-
     // 7. Trust computation
-    const integrity = verifyChain();
-    const cpStats = getCheckpointStats();
-    const trStats = getTradeStats();
-    const metrics = risk.getMetrics();
+    const integrity  = verifyChain();
+    const cpStats    = getCheckpointStats();
+    const trStats    = getTradeStats();
+    const metrics    = risk.getMetrics();
 
     const trust = computeTrust({
-      identityAgeDays: _identity?.identityAgeDays ?? null,
-      isRegistered: _identity?.active ?? false,
+      identityAgeDays:      _identity?.identityAgeDays ?? null,
+      isRegistered:         _identity?.active ?? false,
       checkpointChainValid: integrity.valid,
-      attestationCount: cpStats.signed ?? 0,
-      drawdownPct: metrics.drawdown,
-      maxDrawdownPct: config.maxDrawdownPct,
-      recentWinRate: trStats.total > 0 ? trStats.winRate : null,
+      attestationCount:     cpStats.signed ?? 0,
+      drawdownPct:          metrics.drawdown,
+      maxDrawdownPct:       config.maxDrawdownPct,
+      recentWinRate:        trStats.total > 0 ? trStats.winRate : null,
     });
-
     const trustScoreNormalized = trust.score * 100;
 
-    // Record trust observation for reputation evolution
     recordTrustObservation({
-      agentId: config.agentId,
-      trustScore: trustScoreNormalized,
+      agentId:       config.agentId,
+      trustScore:    trustScoreNormalized,
       previousScore: _prevTrustScore,
-      regime: _mapMarketRegimeToHint(signal.regime),
+      regime:        _mapMarketRegimeToHint(signal.regime),
     });
     _prevTrustScore = trustScoreNormalized;
 
@@ -302,43 +326,40 @@ async function processSymbol(symbol: string): Promise<void> {
       await saveCheckpoint({ eventType: 'halt', symbol, agentId: config.agentId, signal: signal.direction, data: { reason: riskDecision.haltReason } });
       return;
     }
-
     if (!riskDecision.approved) {
-      log.info(`[AGENT] Risk veto for ${symbol}: ${riskDecision.vetoReason}`);
+      log.info(`[AGENT] Risk veto for ${symbol}/${signal.strategy}: ${riskDecision.vetoReason}`);
       _vetoCount++;
       await saveCheckpoint({ eventType: 'veto', symbol, agentId: config.agentId, signal: signal.direction, data: { reason: riskDecision.vetoReason } });
       return;
     }
 
-    // 9. Agent mandate check
+    // 9. Mandate check
     const mandateDecision = evaluateMandate({
       signal,
       positionSize: riskDecision.positionSize,
-      capitalUsd: metrics.equity,
-      asset: symbol.replace('USD', ''),
-      protocol: 'kraken',
-      dailyPnlPct: metrics.dailyPnl / metrics.equity,
+      capitalUsd:   metrics.equity,
+      asset:        symbol.replace('USD', ''),
+      protocol:     'kraken',
+      dailyPnlPct:  metrics.dailyPnl / metrics.equity,
     });
-
     if (!mandateDecision.approved) {
-      log.info(`[AGENT] Mandate veto for ${symbol}: ${mandateDecision.reasons.join(', ')}`);
+      log.info(`[AGENT] Mandate veto for ${symbol}/${signal.strategy}: ${mandateDecision.reasons.join(', ')}`);
       _mandateViolations++;
       _vetoCount++;
       await saveCheckpoint({ eventType: 'veto', symbol, agentId: config.agentId, signal: signal.direction, data: { reason: 'mandate', details: mandateDecision.reasons } });
       return;
     }
 
-    // 10. Execution simulation (slippage + net edge check)
+    // 10. Execution simulation
     const simResult = simulateExecution({
       signal,
       riskDecision,
-      positionSize: riskDecision.positionSize,
-      volatility: 0.02, // ~2% daily vol baseline (ADX is trend strength, not volatility)
+      positionSize:     riskDecision.positionSize,
+      volatility:       0.02,
       volatilityRegime: _mapVolatilityRegime(ensembleResult.regimeSignal?.volatilityRegime) === 'extreme' ? 'extreme' : undefined,
     });
-
     if (!simResult.allowed) {
-      log.info(`[AGENT] Execution simulation blocked for ${symbol}: ${simResult.reason}`);
+      log.info(`[AGENT] Sim blocked for ${symbol}/${signal.strategy}: ${simResult.reason}`);
       _vetoCount++;
       await saveCheckpoint({ eventType: 'veto', symbol, agentId: config.agentId, signal: signal.direction, data: { reason: `simulation_${simResult.reason}` } });
       return;
@@ -346,132 +367,108 @@ async function processSymbol(symbol: string): Promise<void> {
 
     // 11. Trust policy scorecard
     const scorecard = buildTrustPolicyScorecard({
-      mandateViolations: _mandateViolations,
-      vetoedTrades: _vetoCount,
-      totalSignals: _totalSignals,
-      maxDrawdownPct: metrics.drawdown,
+      mandateViolations:    _mandateViolations,
+      vetoedTrades:         _vetoCount,
+      totalSignals:         _totalSignals,
+      maxDrawdownPct:       metrics.drawdown,
       configMaxDrawdownPct: config.maxDrawdownPct,
-      dailyLossBreaches: _dailyLossBreaches,
-      circuitBreakerTrips: _circuitBreakerTrips,
-      checkpointCount: cpStats.total ?? 0,
-      ipfsPinnedCount: _ipfsPinnedCount,
-      onChainAttestations: cpStats.signed ?? 0,
+      dailyLossBreaches:    _dailyLossBreaches,
+      circuitBreakerTrips:  _circuitBreakerTrips,
+      checkpointCount:      cpStats.total ?? 0,
+      ipfsPinnedCount:      _ipfsPinnedCount,
+      onChainAttestations:  cpStats.signed ?? 0,
       checkpointChainValid: integrity.valid,
-      winCount: trStats.wins,
-      lossCount: trStats.losses,
-      stopHitCount: _stopHitCount,
-      totalClosed: trStats.total,
+      winCount:             trStats.wins,
+      lossCount:            trStats.losses,
+      stopHitCount:         _stopHitCount,
+      totalClosed:          trStats.total,
     });
 
-    // 12. Supervisory meta-agent — final capital-rights gate
+    // 12. Supervisory gate
     const supervisory = evaluateSupervisoryDecision({
-      trustScore: trustScoreNormalized,
-      drawdownPct: metrics.drawdown,
-      marketRegime: signal.regime,
-      edgeAllowed: simResult.expectedNetEdgePct > 0,
-      volatilityRegime: ensembleResult.regimeSignal?.volatilityRegime ?? null,
-      validationScore: scorecard.dimensions.validationCompleteness.score * 100,
-      currentOpenPositions: metrics.openPositions,
-      maxOpenPositions: config.maxPositions,
+      trustScore:            trustScoreNormalized,
+      drawdownPct:           metrics.drawdown,
+      marketRegime:          signal.regime,
+      edgeAllowed:           simResult.expectedNetEdgePct > 0,
+      volatilityRegime:      ensembleResult.regimeSignal?.volatilityRegime ?? null,
+      validationScore:       scorecard.dimensions.validationCompleteness.score * 100,
+      currentOpenPositions:  metrics.openPositions,
+      maxOpenPositions:      config.maxPositions,
     });
-
     if (!supervisory.canTrade) {
-      log.info(`[AGENT] Supervisory block for ${symbol}: ${supervisory.restrictions.join(', ')}`);
+      log.info(`[AGENT] Supervisory block for ${symbol}/${signal.strategy}: ${supervisory.restrictions.join(', ')}`);
       await saveCheckpoint({ eventType: 'veto', symbol, agentId: config.agentId, signal: signal.direction, data: { reason: 'supervisory', restrictions: supervisory.restrictions } });
       return;
     }
 
-    // 13. AI narrative (non-blocking)
+    // 13. AI narrative
     const narrative = await generateReasoning(
       signal,
-      `Symbol: ${symbol} | Trust: ${scorecard.tier} | Tier: ${supervisory.trustTier} | Cycle: ${getState().cycle}`,
+      `Symbol: ${symbol} | Strategy: ${signal.strategy} | Trust: ${scorecard.tier} | Cycle: ${getState().cycle}`,
     ).catch(() => null);
     if (narrative) {
       _lastNarrative = { narrative: narrative.narrative, source: narrative.source, symbol, timestamp: new Date().toISOString() };
     }
 
-    // 14. Apply supervisory sizing on top of risk manager sizing
+    // 14. Final sizing
     const riskSizedUnits = riskDecision.positionSize * scorecard.sizeFactor;
-    const finalSize = applySupervisorySizing(
-      riskSizedUnits,
-      metrics.equity,
-      signal.price,
-      supervisory,
-    );
-
+    const finalSize = applySupervisorySizing(riskSizedUnits, metrics.equity, signal.price, supervisory);
     if (finalSize <= 0) {
-      log.info(`[AGENT] Zero-size after supervisory sizing for ${symbol} — skipping`);
+      log.info(`[AGENT] Zero-size after supervisory sizing for ${symbol}/${signal.strategy}`);
       return;
     }
 
-    // 15. Execute
-    const orderResult = await placeOrder({
-      symbol,
-      side: signal.direction as 'buy' | 'sell',
-      volume: finalSize,
-    });
-
+    // 15. Execute order
+    const orderResult = await placeOrder({ symbol, side: signal.direction as 'buy' | 'sell', volume: finalSize });
     if (!orderResult.success) {
-      log.error(`[AGENT] Order failed for ${symbol}: ${orderResult.error}`);
+      log.error(`[AGENT] Order failed for ${symbol}/${signal.strategy}: ${orderResult.error}`);
       return;
     }
 
     const position = risk.openPosition(symbol, signal, { ...riskDecision, positionSize: finalSize }, null);
 
-    // 16. Build artifact
+    // 16. Artifact
     const artifact = buildArtifact({
-      eventType: 'trade',
-      symbol,
-      signal,
+      eventType: 'trade', symbol, signal,
       riskDecision: { ...riskDecision, positionSize: finalSize },
-      cognitive,
-      scorecard,
-      sentiment,
+      cognitive, scorecard, sentiment,
       aiNarrative: narrative?.narrative ?? null,
-      aiSource: narrative?.source ?? null,
-      drawdown: metrics.drawdown,
-      dailyPnl: metrics.dailyPnl,
+      aiSource:    narrative?.source    ?? null,
+      drawdown:    metrics.drawdown,
+      dailyPnl:    metrics.dailyPnl,
     });
 
     // 17. Checkpoint
     const cp = await saveCheckpoint({
-      eventType: 'trade',
-      symbol,
-      agentId: config.agentId,
-      signal: signal.direction,
+      eventType: 'trade', symbol, agentId: config.agentId, signal: signal.direction,
       data: {
-        strategy: signal.strategy,
-        confidence: signal.confidence,
-        price: signal.price,
-        positionId: position.id,
-        supervisoryTier: supervisory.trustTier,
+        strategy:          signal.strategy,
+        confidence:        signal.confidence,
+        price:             signal.price,
+        positionId:        position.id,
+        supervisoryTier:   supervisory.trustTier,
         capitalMultiplier: supervisory.capitalMultiplier,
-        simSlippageBps: simResult.estimatedSlippageBps,
-        netEdgePct: simResult.expectedNetEdgePct,
+        simSlippageBps:    simResult.estimatedSlippageBps,
+        netEdgePct:        simResult.expectedNetEdgePct,
       },
     });
-
     artifact.checkpointHash = cp.hash;
     artifact.checkpointSignature = cp.signature;
 
     // 18. IPFS + on-chain (async, non-blocking)
     if (config.pinataJwt) {
-      pinArtifact(artifact, `sentinel-${symbol}-${Date.now()}`).then(r => {
-        if (r) {
-          log.info(`[AGENT] IPFS: ${r.cid}`);
-          _ipfsPinnedCount++;
-        }
+      pinArtifact(artifact, `sentinel-${symbol}-${signal.strategy}-${Date.now()}`).then(r => {
+        if (r) { log.info(`[AGENT] IPFS: ${r.cid}`); _ipfsPinnedCount++; }
       }).catch(() => {});
     }
     if (config.validationRegistry && cp.signature && config.agentId != null) {
       postCheckpointOnChain({ agentId: config.agentId, dataHash: cp.hash, signature: cp.signature }).catch(() => {});
     }
 
-    log.info(`[AGENT] Trade opened: ${symbol} ${signal.direction.toUpperCase()} size=${finalSize.toFixed(6)} @ ${signal.price.toFixed(4)} | tier=${supervisory.trustTier} | CP#${cp.id}`);
+    log.info(`[AGENT] Trade opened: ${symbol} ${signal.direction.toUpperCase()} size=${finalSize.toFixed(6)} @ ${signal.price.toFixed(4)} | strategy=${signal.strategy} | tier=${supervisory.trustTier} | CP#${cp.id}`);
 
   } catch (e) {
-    _consecutiveErrors++;
-    log.error(`[AGENT] processSymbol(${symbol}) error: ${e}`);
+    log.error(`[AGENT] executeSignal(${symbol}/${rawSignal.strategy}) error: ${e}`);
   }
 }
 

@@ -24,7 +24,8 @@ import { HOLD_SIGNAL } from './types.js';
 
 export interface EnsembleResult {
   regimeSignal: RegimeSignal;
-  tradeSignal: TradeSignal;
+  tradeSignal: TradeSignal;        // first fired signal or HOLD (backward compat)
+  tradeSignals: TradeSignal[];     // ALL signals that met threshold (one per strategy)
   strategyEvaluations: { name: string; signal: string; confidence: number }[];
 }
 
@@ -59,18 +60,32 @@ export class EnsembleStrategy {
       ['mean_reversion',    () => this.meanRev.generate(candles, regime)],
     ];
 
+    const firedSignals: TradeSignal[] = [];
+
     for (const [name, fn] of strategies) {
       const signal = fn();
       evaluations.push({ name, signal: signal.direction, confidence: signal.confidence });
 
       if (signal.direction !== 'hold' && signal.confidence >= this.minConfidence) {
-        return { regimeSignal, tradeSignal: signal, strategyEvaluations: evaluations };
+        firedSignals.push(signal);
+        // continue — collect every strategy that fires, not just the first
       }
     }
 
+    if (firedSignals.length > 0) {
+      return {
+        regimeSignal,
+        tradeSignal:  firedSignals[0],
+        tradeSignals: firedSignals,
+        strategyEvaluations: evaluations,
+      };
+    }
+
+    const hold = HOLD_SIGNAL(price, regime, 'No strategy reached min confidence threshold');
     return {
       regimeSignal,
-      tradeSignal: HOLD_SIGNAL(price, regime, 'No strategy reached min confidence threshold'),
+      tradeSignal:  hold,
+      tradeSignals: [],
       strategyEvaluations: evaluations,
     };
   }
