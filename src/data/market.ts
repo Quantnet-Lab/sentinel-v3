@@ -30,11 +30,6 @@ function krakenPair(symbol: string): string {
 }
 
 export async function fetchCandles(symbol: string, intervalMinutes = 1, limit = 200): Promise<Candle[]> {
-  // Try Kraken CLI first
-  const cliCandles = await fetchViaCLI(symbol, intervalMinutes, limit);
-  if (cliCandles.length > 0) return cliCandles;
-
-  // Fallback to Kraken REST
   return fetchViaREST(symbol, intervalMinutes, limit);
 }
 
@@ -93,23 +88,26 @@ async function fetchViaCLI(symbol: string, intervalMinutes: number, limit: numbe
 
 export async function fetchTicker(symbols: string[]): Promise<Record<string, { price: number; change24hPct: number }>> {
   const pairs = symbols.map(krakenPair).join(',');
-  try {
-    const resp = await fetch(`${KRAKEN_REST}/Ticker?pair=${pairs}`, { signal: AbortSignal.timeout(15000) });
-    const data: any = await resp.json();
-    if (data.error?.length) throw new Error(data.error[0]);
 
-    const result: Record<string, { price: number; change24hPct: number }> = {};
-    for (const sym of symbols) {
-      const key = Object.keys(data.result).find(k => k.includes(krakenPair(sym).slice(0, 3)));
-      if (!key) continue;
-      const t = data.result[key];
-      const price = parseFloat(t.c[0]);
-      const open  = parseFloat(t.o);
-      result[sym] = { price, change24hPct: ((price - open) / open) * 100 };
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const resp = await fetch(`${KRAKEN_REST}/Ticker?pair=${pairs}`, { signal: AbortSignal.timeout(15000) });
+      const data: any = await resp.json();
+      if (data.error?.length) throw new Error(data.error[0]);
+
+      const result: Record<string, { price: number; change24hPct: number }> = {};
+      for (const sym of symbols) {
+        const key = Object.keys(data.result).find(k => k.includes(krakenPair(sym).slice(0, 3)));
+        if (!key) continue;
+        const t = data.result[key];
+        const price = parseFloat(t.c[0]);
+        const open  = parseFloat(t.o);
+        result[sym] = { price, change24hPct: ((price - open) / open) * 100 };
+      }
+      return result;
+    } catch (e) {
+      if (attempt === 2) log.warn(`[MARKET] Ticker fetch failed: ${e}`);
     }
-    return result;
-  } catch (e) {
-    log.warn(`[MARKET] Ticker fetch failed: ${e}`);
-    return {};
   }
+  return {};
 }
