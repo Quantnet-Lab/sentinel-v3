@@ -417,23 +417,38 @@ function Sentinel() {
             </div>
           </Panel>
 
-          {/* Live Signals */}
-          <Panel title="Live Signals" tag={`${signals.length} symbols`}>
-            <div style={{ display:"grid", gridTemplateColumns:`repeat(${Math.max(1,Math.min(signals.length,5))},1fr)`, gap:8, height:"100%" }}>
-              {signals.map(s => (
-                <div key={s.symbol} style={{
-                  background:T.s2, borderRadius:5, padding:"10px 12px",
-                  border:`1px solid ${s.direction==="buy"?`${T.up}40`:s.direction==="sell"?`${T.dn}40`:T.brd}`,
-                }}>
-                  <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
-                    <span style={{ fontWeight:700, color:T.w }}>{s.symbol}</span>
-                    <Badge color={dirColor(s.direction)}>{(s.direction||"hold").toUpperCase()}</Badge>
-                  </div>
-                  <div style={{ fontSize:10, color:T.fg2, marginBottom:4 }}>{s.strategy ?? "—"}</div>
-                  <div style={{ fontSize:10, color:T.fg }}>Conf: <span style={{ color:s.confidence>0.6?T.up:T.warn }}>{pct(s.confidence??0)}</span></div>
+          {/* Live Signals — one card per fired strategy */}
+          <Panel title="Live Signals" tag={`${signals.length} fired`}>
+            <div style={{ overflowY:"auto", maxHeight:"100%" }}>
+              {signals.length === 0 && (
+                <span style={{ color:T.fg3, fontSize:10 }}>No strategies fired this cycle</span>
+              )}
+              {signals.length > 0 && (
+                <div style={{ display:"grid", gridTemplateColumns:`repeat(${Math.max(1,Math.min(signals.length,4))},1fr)`, gap:8 }}>
+                  {signals.map((s, i) => (
+                    <div key={`${s.symbol}-${s.strategy}-${i}`} style={{
+                      background:T.s2, borderRadius:5, padding:"10px 12px",
+                      border:`1px solid ${s.direction==="buy"?`${T.up}50`:s.direction==="sell"?`${T.dn}50`:T.brd}`,
+                    }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+                        <span style={{ fontWeight:700, color:T.w, fontSize:11 }}>{s.symbol}</span>
+                        <Badge color={dirColor(s.direction)}>{(s.direction||"hold").toUpperCase()}</Badge>
+                      </div>
+                      <div style={{ fontSize:9.5, color:T.cyan, marginBottom:4, fontWeight:600 }}>
+                        {(s.strategy ?? "unknown").replace(/_/g," ").toUpperCase()}
+                      </div>
+                      <div style={{ fontSize:10, color:T.fg, marginBottom:3 }}>
+                        Conf: <span style={{ color:s.confidence>=0.7?T.up:s.confidence>=0.5?T.warn:T.dn, fontWeight:700 }}>{pct(s.confidence??0)}</span>
+                      </div>
+                      {s.reasoning && (
+                        <div style={{ fontSize:9, color:T.fg3, lineHeight:1.3, borderTop:`1px solid ${T.brd}`, paddingTop:4, marginTop:4 }}>
+                          {s.reasoning.length > 80 ? s.reasoning.slice(0,80)+"…" : s.reasoning}
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
-              ))}
-              {signals.length === 0 && <span style={{ color:T.fg3, fontSize:10 }}>No signals yet</span>}
+              )}
             </div>
           </Panel>
 

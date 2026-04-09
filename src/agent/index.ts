@@ -103,6 +103,8 @@ let _consecutiveErrors = 0;
 let _lastNarrative: { narrative: string; source: string; symbol: string; timestamp: string } | null = null;
 let _lastSentiment: Record<string, unknown> | null = null;
 let _lastEvaluations: { symbol: string; evaluations: { name: string; signal: string; confidence: number }[] } | null = null;
+// All signals that fired last cycle, keyed by symbol
+const _lastFiredSignals: Record<string, { symbol: string; direction: string; confidence: number; strategy: string; reasoning: string; timestamp: string }[]> = {};
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 
@@ -233,6 +235,17 @@ async function processSymbol(symbol: string): Promise<void> {
     }
 
     log.info(`[AGENT] ${symbol} — ${firedSignals.length} strategy signal(s) fired: ${firedSignals.map(s => s.strategy).join(', ')}`);
+
+    // Broadcast all fired signals so dashboard can show one card per strategy
+    _lastFiredSignals[symbol] = firedSignals.map(s => ({
+      symbol,
+      direction:  s.direction,
+      confidence: s.confidence,
+      strategy:   s.strategy ?? 'unknown',
+      reasoning:  s.reasoning ?? '',
+      timestamp:  s.timestamp ?? new Date().toISOString(),
+    }));
+    broadcastState();
 
     // Fetch sentiment + PRISM once per symbol (shared across all signals)
     const [sentiment, prism] = await Promise.all([
@@ -633,12 +646,7 @@ function broadcastState(): void {
       sizeFactor: scorecard.sizeFactor,
       dimensions: scorecard.dimensions,
     },
-    signals: Object.entries(state.symbols).map(([sym, s]) => ({
-      symbol: sym,
-      direction: s.lastSignal,
-      confidence: 0,
-      reasoning: `Last signal: ${s.lastSignalTime ?? 'none'}`,
-    })),
+    signals: Object.values(_lastFiredSignals).flat(),
     governance: {
       mandateViolations: _mandateViolations,
       vetoedTrades: _vetoCount,
