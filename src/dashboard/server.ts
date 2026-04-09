@@ -1,0 +1,87 @@
+/**
+ * Sentinel Dashboard Server
+ * Serves the live proof dashboard with checkpoint verification,
+ * signal history, risk metrics, and trust scorecard.
+ */
+
+import express from 'express';
+import cors from 'cors';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { createLogger } from '../agent/logger.js';
+import { config } from '../agent/config.js';
+import { getCheckpoints, getCheckpointStats, verifyChain } from '../trust/checkpoint.js';
+import { getRecentLogs } from '../agent/logger.js';
+import { getSAGEStatus } from '../strategy/sage-engine.js';
+
+const log = createLogger('DASHBOARD');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+let _agentState: Record<string, unknown> = {};
+export function injectAgentState(state: Record<string, unknown>): void {
+  _agentState = state;
+}
+
+export function startDashboard(): void {
+  const app = express();
+  app.use(cors());
+  app.use(express.json());
+  app.use(express.static(join(__dirname, 'public')));
+
+  // ── API routes ──────────────────────────────────────────────────────────────
+
+  app.get('/api/status', (_, res) => {
+    res.json({
+      agent: config.agentName,
+      agentId: config.agentId,
+      version: '3.0',
+      executionMode: config.executionMode,
+      symbols: config.symbols,
+      ..._agentState,
+    });
+  });
+
+  app.get('/api/checkpoints', (req, res) => {
+    const limit = parseInt((req.query.limit as string) ?? '50');
+    const cps = getCheckpoints().slice(-limit).reverse();
+    res.json({ checkpoints: cps, stats: getCheckpointStats(), integrity: verifyChain() });
+  });
+
+  app.get('/api/checkpoint/:id', (req, res) => {
+    const id = parseInt(req.params.id);
+    const cp = getCheckpoints().find(c => c.id === id);
+    if (!cp) return res.status(404).json({ error: 'not found' });
+    res.json(cp);
+  });
+
+  app.get('/api/risk', (_, res) => {
+    res.json((_agentState as any).riskMetrics ?? {});
+  });
+
+  app.get('/api/trust', (_, res) => {
+    res.json((_agentState as any).trust ?? {});
+  });
+
+  app.get('/api/signals', (_, res) => {
+    res.json((_agentState as any).signals ?? []);
+  });
+
+  app.get('/api/sage', (_, res) => {
+    res.json(getSAGEStatus());
+  });
+
+  app.get('/api/logs', (req, res) => {
+    const limit = parseInt((req.query.limit as string) ?? '100');
+    res.json(getRecentLogs().slice(-limit));
+  });
+
+  app.get('/api/verify-checkpoints', (_, res) => {
+    const result = verifyChain();
+    const stats = getCheckpointStats();
+    res.json({ ...result, ...stats });
+  });
+
+  app.listen(config.dashboardPort, () => {
+    log.info(`[DASHBOARD] Running on http://localhost:${config.dashboardPort}`);
+  });
+}

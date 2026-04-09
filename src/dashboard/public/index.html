@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sentinel v3 — Live Proof Dashboard</title>
+  <style>
+    :root {
+      --bg: #0a0c10; --bg2: #111418; --bg3: #1a1f28;
+      --border: #2a3040; --accent: #3b82f6; --green: #22c55e;
+      --red: #ef4444; --yellow: #eab308; --text: #e2e8f0; --muted: #6b7280;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'SF Mono', monospace; font-size: 13px; }
+    header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 16px; }
+    header h1 { font-size: 16px; font-weight: 600; color: var(--accent); letter-spacing: 2px; }
+    .badge { background: var(--bg3); border: 1px solid var(--border); padding: 3px 8px; border-radius: 4px; font-size: 11px; color: var(--muted); }
+    .badge.live { border-color: var(--green); color: var(--green); }
+    main { padding: 20px 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+    .card h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 12px; }
+    .metric { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); }
+    .metric:last-child { border: none; }
+    .metric .label { color: var(--muted); }
+    .metric .value { font-weight: 600; }
+    .up { color: var(--green); } .down { color: var(--red); } .warn { color: var(--yellow); }
+    .signal-row { padding: 6px 0; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 80px 50px 70px 1fr; gap: 8px; }
+    .signal-row:last-child { border: none; }
+    .buy { color: var(--green); } .sell { color: var(--red); } .hold { color: var(--muted); }
+    .cp-row { padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 11px; display: grid; grid-template-columns: 30px 80px 60px 1fr; gap: 8px; }
+    .cp-row:last-child { border: none; }
+    .full-width { grid-column: 1 / -1; }
+    #integrity-ok { color: var(--green); } #integrity-fail { color: var(--red); }
+    .tier-elite { color: #a78bfa; } .tier-elevated { color: var(--green); }
+    .tier-standard { color: var(--accent); } .tier-limited { color: var(--yellow); } .tier-probation { color: var(--red); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>⚡ SENTINEL v3</h1>
+    <span class="badge live" id="status-badge">LIVE</span>
+    <span class="badge" id="mode-badge">paper</span>
+    <span class="badge" id="agent-badge">agent #—</span>
+    <span style="margin-left:auto;color:var(--muted)" id="last-update">–</span>
+  </header>
+
+  <main>
+    <!-- Risk Metrics -->
+    <div class="card">
+      <h2>Portfolio</h2>
+      <div class="metric"><span class="label">Equity</span><span class="value" id="equity">–</span></div>
+      <div class="metric"><span class="label">Daily P&L</span><span class="value" id="daily-pnl">–</span></div>
+      <div class="metric"><span class="label">Drawdown</span><span class="value" id="drawdown">–</span></div>
+      <div class="metric"><span class="label">Open Positions</span><span class="value" id="positions">–</span></div>
+      <div class="metric"><span class="label">Status</span><span class="value" id="risk-status">–</span></div>
+    </div>
+
+    <!-- Trust -->
+    <div class="card">
+      <h2>Trust Scorecard</h2>
+      <div class="metric"><span class="label">Score</span><span class="value" id="trust-score">–</span></div>
+      <div class="metric"><span class="label">Tier</span><span class="value" id="trust-tier">–</span></div>
+      <div class="metric"><span class="label">Size Factor</span><span class="value" id="trust-size">–</span></div>
+      <div class="metric"><span class="label">Checkpoints</span><span class="value" id="cp-count">–</span></div>
+      <div class="metric"><span class="label">Chain Integrity</span><span class="value" id="chain-integrity">–</span></div>
+    </div>
+
+    <!-- Signals -->
+    <div class="card full-width">
+      <h2>Latest Signals</h2>
+      <div class="signal-row" style="color:var(--muted);font-size:11px">
+        <span>Symbol</span><span>Signal</span><span>Confidence</span><span>Reasoning</span>
+      </div>
+      <div id="signals-list"></div>
+    </div>
+
+    <!-- Checkpoints -->
+    <div class="card full-width">
+      <h2>Recent Checkpoints</h2>
+      <div class="cp-row" style="color:var(--muted);font-size:11px">
+        <span>#</span><span>Time</span><span>Event</span><span>Hash</span>
+      </div>
+      <div id="cp-list"></div>
+    </div>
+  </main>
+
+  <script>
+    async function refresh() {
+      try {
+        const [status, cps, risk, trust] = await Promise.all([
+          fetch('/api/status').then(r => r.json()),
+          fetch('/api/checkpoints?limit=10').then(r => r.json()),
+          fetch('/api/risk').then(r => r.json()),
+          fetch('/api/trust').then(r => r.json()),
+        ]);
+
+        document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+        document.getElementById('mode-badge').textContent = status.executionMode ?? '–';
+        document.getElementById('agent-badge').textContent = `agent #${status.agentId ?? '–'}`;
+
+        // Risk
+        const eq = risk.equity ?? 0;
+        document.getElementById('equity').textContent = '$' + eq.toFixed(2);
+        const dpnl = risk.dailyPnl ?? 0;
+        const dpnlEl = document.getElementById('daily-pnl');
+        dpnlEl.textContent = (dpnl >= 0 ? '+' : '') + '$' + dpnl.toFixed(2);
+        dpnlEl.className = 'value ' + (dpnl >= 0 ? 'up' : 'down');
+        const dd = (risk.drawdown ?? 0) * 100;
+        document.getElementById('drawdown').textContent = dd.toFixed(2) + '%';
+        document.getElementById('positions').textContent = risk.openPositions ?? 0;
+        document.getElementById('risk-status').textContent = risk.status ?? '–';
+
+        // Trust
+        if (trust && trust.overall != null) {
+          document.getElementById('trust-score').textContent = (trust.overall * 100).toFixed(0) + '%';
+          const tierEl = document.getElementById('trust-tier');
+          tierEl.textContent = trust.tier ?? '–';
+          tierEl.className = 'value tier-' + (trust.tier ?? '');
+          document.getElementById('trust-size').textContent = ((trust.sizeFactor ?? 1) * 100).toFixed(0) + '%';
+        }
+
+        // Checkpoints
+        document.getElementById('cp-count').textContent = cps.stats?.total ?? 0;
+        const integrity = cps.integrity;
+        const intEl = document.getElementById('chain-integrity');
+        intEl.textContent = integrity?.valid ? '✓ Valid' : '✗ Broken';
+        intEl.id = integrity?.valid ? 'integrity-ok' : 'integrity-fail';
+
+        // Signals
+        const signals = status.signals ?? [];
+        document.getElementById('signals-list').innerHTML = signals.map(s =>
+          `<div class="signal-row">
+            <span>${s.symbol}</span>
+            <span class="${s.direction}">${s.direction.toUpperCase()}</span>
+            <span>${(s.confidence * 100).toFixed(0)}%</span>
+            <span style="color:var(--muted);overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${s.reasoning?.slice(0, 60) ?? '–'}</span>
+          </div>`
+        ).join('') || '<div style="color:var(--muted);padding:8px 0">No signals yet</div>';
+
+        // Checkpoints
+        const cpList = cps.checkpoints ?? [];
+        document.getElementById('cp-list').innerHTML = cpList.map(c =>
+          `<div class="cp-row">
+            <span>${c.id}</span>
+            <span>${new Date(c.timestamp).toLocaleTimeString()}</span>
+            <span class="${c.signal === 'buy' ? 'buy' : c.signal === 'sell' ? 'sell' : 'hold'}">${c.eventType}</span>
+            <span style="color:var(--muted);font-family:monospace">${c.hash?.slice(0, 20) ?? '–'}…</span>
+          </div>`
+        ).join('') || '<div style="color:var(--muted);padding:8px 0">No checkpoints yet</div>';
+
+      } catch(e) {
+        document.getElementById('status-badge').textContent = 'OFFLINE';
+        document.getElementById('status-badge').className = 'badge';
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
