@@ -29,6 +29,8 @@ export const config = {
   // ── AI / LLM ──────────────────────────────────────────────────────────────
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
   geminiApiKey:    process.env.GEMINI_API_KEY || '',
+  geminiPsid:     process.env.GEMINI_PSID || '',
+  geminiPsidts:   process.env.GEMINI_PSIDTS || '',
   openaiApiKey:    process.env.OPENAI_API_KEY || '',
   sageEnabled:     process.env.SAGE_ENABLED !== 'false',
   sageMinOutcomes: parseInt(process.env.SAGE_MIN_OUTCOMES || '5'),

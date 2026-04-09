@@ -8,13 +8,14 @@
 
 import { createLogger } from '../agent/logger.js';
 import { config } from '../agent/config.js';
+import { askGeminiWithCookies } from '../data/gemini-cookie-client.js';
 import type { TradeSignal } from './types.js';
 
 const log = createLogger('AI-REASONING');
 
 export interface ReasoningResult {
   narrative: string;
-  source: 'claude' | 'gemini' | 'openai' | 'template';
+  source: 'claude' | 'gemini' | 'gemini-cookie' | 'openai' | 'template';
   latencyMs: number;
 }
 
@@ -96,6 +97,12 @@ export async function generateReasoning(signal: TradeSignal, contextPrefix = '')
 
   const gemini = await tryGemini(prompt);
   if (gemini) return { narrative: gemini.trim(), source: 'gemini', latencyMs: Date.now() - start };
+
+  // Cookie-based Gemini fallback (no API key required)
+  if (config.geminiPsid && config.geminiPsidts) {
+    const cookieResult = await askGeminiWithCookies(prompt, config.geminiPsid, config.geminiPsidts);
+    if (cookieResult) return { narrative: cookieResult.trim(), source: 'gemini-cookie', latencyMs: Date.now() - start };
+  }
 
   log.warn('All LLMs unavailable — using template reasoning');
   return { narrative: templateReasoning(signal), source: 'template', latencyMs: Date.now() - start };
