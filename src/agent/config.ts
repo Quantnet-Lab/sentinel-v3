@@ -68,7 +68,7 @@ export const config = {
     bbStdDev:             2.0,
     stopLossAtrMultiple:  2.0,
     takeProfitAtrMultiple: 3.0,
-    minConfidence:        0.5,
+    minConfidence:        parseFloat(process.env.MIN_CONFIDENCE || '0.4'),
   },
 
   // ── Mandate / Governance ──────────────────────────────────────────────────

@@ -251,6 +251,7 @@ function Sentinel() {
   const hb      = status?.heartbeat ?? {};
   const narrative = status?.narrative ?? null;
   const sentiment = status?.sentiment ?? null;
+  const strategyEvals = status?.strategyEvaluations ?? null;
 
   const tier    = trust?.tier ?? "probation";
   const tScore  = (trust?.overall ?? 0) * 100;
@@ -264,15 +265,16 @@ function Sentinel() {
   const tradeList = trades.trades ?? [];
   const trStats   = trades.stats  ?? {};
 
-  const stagesDone = useMemo(() => {
-    if (!cpList.length) return 0;
+  const { stagesDone, hasActiveStage } = useMemo(() => {
+    if (!cpList.length) return { stagesDone: 0, hasActiveStage: false };
     const last = cpList[0];
-    if (last.eventType === "trade")     return 18;
-    if (last.eventType === "close")     return 15;
-    if (last.eventType === "heartbeat") return 8;
-    if (last.eventType === "veto")      return 10;
-    if (last.eventType === "halt")      return 12;
-    return 3;
+    if (last.eventType === "trade")     return { stagesDone: 18, hasActiveStage: false };
+    if (last.eventType === "close")     return { stagesDone: 15, hasActiveStage: false };
+    if (last.eventType === "heartbeat") return { stagesDone: 8,  hasActiveStage: true  };
+    if (last.eventType === "veto")      return { stagesDone: 10, hasActiveStage: true  };
+    if (last.eventType === "halt")      return { stagesDone: 12, hasActiveStage: true  };
+    // "signal" = HOLD — completed Oracle+Ensemble+Neuro-Sym, stopped there
+    return { stagesDone: 3, hasActiveStage: false };
   }, [cpList]);
 
   const lastCycleMs = hb.lastCycleAt ? Date.now() - new Date(hb.lastCycleAt).getTime() : null;
@@ -503,7 +505,7 @@ function Sentinel() {
           <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
             {PIPELINE_STAGES.map((s,i) => {
               const done   = i < stagesDone;
-              const active = i === stagesDone;
+              const active = hasActiveStage && i === stagesDone;
               const c = done ? T.up : active ? T.warn : T.fg3;
               return (
                 <div key={i} style={{
@@ -524,8 +526,8 @@ function Sentinel() {
           </div>
           <div style={{ marginTop:8, display:"flex", gap:16, fontSize:10, color:T.fg2 }}>
             <span><span style={{ color:T.up }}>■</span> Passed ({stagesDone})</span>
-            <span><span style={{ color:T.warn }}>■</span> Active</span>
-            <span><span style={{ color:T.fg3 }}>■</span> Pending ({18-stagesDone})</span>
+            {hasActiveStage && <span><span style={{ color:T.warn }}>■</span> Active</span>}
+            <span><span style={{ color:T.fg3 }}>■</span> {cpList[0]?.eventType === "signal" ? "Skipped — HOLD signal" : `Pending (${18-stagesDone})`}</span>
           </div>
         </Panel>
 
@@ -566,8 +568,8 @@ function Sentinel() {
           </div>
         </Panel>
 
-        {/* ── Row 4: Selected trade deep dive + AI Reasoning + Execution ── */}
-        <div className="col3" style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10, marginBottom:10 }}>
+        {/* ── Row 4: Deep dive + AI Reasoning + Strategy Scores + Governance ── */}
+        <div className="col3" style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:10, marginBottom:10 }}>
 
           {/* Selected Checkpoint Detail */}
           {(() => {
@@ -623,6 +625,34 @@ function Sentinel() {
                 Awaiting first trade for AI narrative…
                 <div style={{ marginTop:8, fontSize:9, color:T.fg3 }}>Chain: Claude → Groq → Template</div>
               </div>
+            )}
+          </Panel>
+
+          {/* Strategy Scores */}
+          <Panel title="Strategy Scores" tag={strategyEvals ? strategyEvals.symbol : "awaiting"} tip="Confidence score each strategy computed last cycle. Min threshold shown.">
+            {strategyEvals ? (
+              <div>
+                {strategyEvals.evaluations.map(e => {
+                  const c = e.signal !== "hold" ? T.up : e.confidence > 0.3 ? T.warn : T.fg3;
+                  const barVal = e.confidence;
+                  return (
+                    <div key={e.name} style={{ marginBottom:7 }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, marginBottom:2 }}>
+                        <span style={{ color: e.signal !== "hold" ? T.up : T.fg2 }}>{e.name.replace(/_/g," ")}</span>
+                        <span style={{ color:c, fontWeight:600 }}>{e.signal !== "hold" ? `${e.signal.toUpperCase()} ` : ""}{pct(e.confidence)}</span>
+                      </div>
+                      <div style={{ height:4, background:T.bg, borderRadius:2, overflow:"hidden", position:"relative" }}>
+                        <div style={{ height:"100%", width:`${clamp(barVal,0,1)*100}%`, background:c, borderRadius:2, transition:"width .5s" }} />
+                        {/* threshold marker at 40% */}
+                        <div style={{ position:"absolute", top:0, bottom:0, left:"40%", width:1, background:`${T.warn}80` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{ marginTop:6, fontSize:9, color:T.fg3 }}>Vertical line = 40% threshold · ICT/AMD only fire in Kill Zones</div>
+              </div>
+            ) : (
+              <div style={{ color:T.fg3, fontSize:10, textAlign:"center", padding:16 }}>Awaiting first cycle…</div>
             )}
           </Panel>
 

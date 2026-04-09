@@ -100,6 +100,7 @@ let _lastTradeAt: string | null = null;
 let _consecutiveErrors = 0;
 let _lastNarrative: { narrative: string; source: string; symbol: string; timestamp: string } | null = null;
 let _lastSentiment: Record<string, unknown> | null = null;
+let _lastEvaluations: { symbol: string; evaluations: { name: string; signal: string; confidence: number }[] } | null = null;
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 
@@ -223,6 +224,9 @@ async function processSymbol(symbol: string): Promise<void> {
       };
       log.warn(`[AGENT] TEST MODE: injected BUY signal for ${symbol} @ ${price.toFixed(2)}`);
     }
+
+    _lastEvaluations = { symbol, evaluations: ensembleResult.strategyEvaluations };
+    log.debug(`[AGENT] ${symbol} strategy scores: ${ensembleResult.strategyEvaluations.map(e => `${e.name}=${(e.confidence*100).toFixed(0)}%`).join(' | ')}`);
 
     // 4. Neuro-symbolic reasoning
     const cognitive = applySymbolicReasoning(signal);
@@ -652,6 +656,7 @@ function broadcastState(): void {
     },
     narrative: _lastNarrative,
     sentiment: _lastSentiment,
+    strategyEvaluations: _lastEvaluations,
   };
 
   injectDashboard(shared);
