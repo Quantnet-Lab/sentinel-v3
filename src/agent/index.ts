@@ -1,22 +1,32 @@
 /**
  * Sentinel v3 — Main Agent Loop
  *
- * Execution pipeline per cycle, per symbol:
- *   1. Fetch market candles + ticker
- *   2. Run ensemble strategy → TradeSignal
- *   3. Apply neuro-symbolic reasoning layer
- *   4. Generate AI narrative (Claude → Gemini → template)
- *   5. Run risk engine (circuit breaker, drawdown, sizing)
- *   6. Apply trust-based position sizing
- *   7. Execute order via Kraken bridge (paper/live/disabled)
- *   8. Build + emit validation artifact
- *   9. Save tamper-evident checkpoint
- *  10. Pin artifact to IPFS (async)
- *  11. Post attestation on-chain (async)
+ * Full governance pipeline per cycle, per symbol:
+ *   1.  Fetch market candles + ticker
+ *   2.  Oracle integrity guard (price feed validation)
+ *   3.  Run ensemble strategy → TradeSignal (6 ICT/SMC strategies)
+ *   4.  Apply neuro-symbolic reasoning layer
+ *   5.  Sentiment + PRISM confidence modifiers
+ *   6.  Adaptive learning context bias
+ *   7.  Operator control gate (pause / emergency stop)
+ *   8.  Agent mandate check (asset, protocol, size, daily loss limits)
+ *   9.  Execution simulation (slippage, net edge, price impact)
+ *  10.  Supervisory meta-agent (trust tier, drawdown, regime throttle)
+ *  11.  Trust policy scorecard
+ *  12.  Risk engine (circuit breaker, drawdown, ATR sizing)
+ *  13.  AI narrative generation (Claude → Gemini → template fallback)
+ *  14.  Execute order via Kraken bridge (paper / live / disabled)
+ *  15.  Build + emit validation artifact
+ *  16.  Save tamper-evident checkpoint
+ *  17.  Pin artifact to IPFS (async)
+ *  18.  Post attestation on-chain (async)
  *
  * Governance:
  *   - SAGE adaptive engine reflects every 6h on trade outcomes
+ *   - Adaptive learning layer tunes parameters within CAGE bounds
  *   - Trust policy scorecard governs position sizing
+ *   - Supervisory meta-agent enforces capital tier limits
+ *   - Operator control allows human pause / emergency stop at any time
  *   - Circuit breaker halts on daily loss / max drawdown / consecutive losses
  */
 
@@ -44,6 +54,7 @@ import { fetchPrismData, prismConfidenceModifier } from '../data/prism-feed.js';
 import { runEnsemble } from '../strategy/ensemble.js';
 import { applySymbolicReasoning } from '../strategy/neuro-symbolic.js';
 import { generateReasoning } from '../strategy/ai-reasoning.js';
+import { runAdaptation, recordTradeOutcome, getContextConfidenceBias } from '../strategy/adaptive-learning.js';
 import { RiskManager } from '../risk/manager.js';
 import { computeTrust } from '../chain/trust.js';
 import { loadIdentity, postCheckpointOnChain } from '../chain/identity.js';
@@ -51,6 +62,16 @@ import { placeOrder, initPaperAccount } from '../data/kraken-bridge.js';
 import { runSAGEReflection } from '../strategy/sage-engine.js';
 import { startDashboard, injectAgentState as injectDashboard } from '../dashboard/server.js';
 import { startMCPServer, injectAgentState as injectMCP } from '../mcp/server.js';
+import { evaluateOracleIntegrity } from '../security/oracle-integrity.js';
+import { evaluateMandate } from '../chain/agent-mandate.js';
+import { simulateExecution } from '../chain/execution-simulator.js';
+import {
+  evaluateSupervisoryDecision, applySupervisorySizing,
+} from './supervisory-meta-agent.js';
+import {
+  getOperatorControlState,
+} from './operator-control.js';
+import { recordTrustObservation } from '../trust/reputation-evolution.js';
 import type { ClosedTrade } from './trade-log.js';
 
 const log = createLogger('AGENT');
@@ -59,23 +80,25 @@ const log = createLogger('AGENT');
 
 const risk = new RiskManager(config.initialCapital ?? 10000);
 
-// Agent identity cache — populated at bootstrap
 let _identity: Awaited<ReturnType<typeof loadIdentity>> | null = null;
 
-// Scorecard input trackers (in-memory, accumulate over session)
+// Session-level governance counters
 let _vetoCount = 0;
 let _totalSignals = 0;
 let _stopHitCount = 0;
 let _dailyLossBreaches = 0;
 let _circuitBreakerTrips = 0;
+let _mandateViolations = 0;
+let _ipfsPinnedCount = 0;
+let _prevTrustScore: number | null = null;
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 async function bootstrap(): Promise<void> {
-  log.info('[AGENT] ─────────────────────────────────────────');
+  log.info('[AGENT] ─────────────────────────────────────────────────────────');
   log.info(`[AGENT] Sentinel v3 starting`);
   log.info(`[AGENT] Mode: ${config.executionMode} | Symbols: ${config.symbols.join(', ')}`);
-  log.info('[AGENT] ─────────────────────────────────────────');
+  log.info('[AGENT] ─────────────────────────────────────────────────────────');
 
   loadState();
   loadTradeLog();
@@ -102,6 +125,14 @@ async function bootstrap(): Promise<void> {
 
 async function runCycle(): Promise<void> {
   const state = getState();
+
+  // Operator control gate — hard block on pause or emergency stop
+  const opState = getOperatorControlState();
+  if (!opState.canTrade) {
+    log.warn(`[AGENT] Operator control active (${opState.mode}): ${opState.lastReason}`);
+    return;
+  }
+
   if (state.halted) {
     log.warn(`[AGENT] Halted: ${state.haltReason}`);
     return;
@@ -109,9 +140,13 @@ async function runCycle(): Promise<void> {
 
   incrementCycle();
 
-  await Promise.allSettled(
-    config.symbols.map(symbol => processSymbol(symbol))
-  );
+  // Run adaptive learning reflection (throttled internally)
+  const adaptations = runAdaptation(state.cycle);
+  if (adaptations.length > 0) {
+    log.info(`[AGENT] Adaptive learning: ${adaptations.length} parameter(s) updated`);
+  }
+
+  await Promise.allSettled(config.symbols.map(symbol => processSymbol(symbol)));
 
   await checkManagedPositions();
   broadcastState();
@@ -132,12 +167,32 @@ async function processSymbol(symbol: string): Promise<void> {
       return;
     }
 
-    // 2. Ensemble strategy
+    // 2. Oracle integrity guard
+    const prices = candles.map(c => c.close);
+    const highs = candles.map(c => c.high);
+    const lows = candles.map(c => c.low);
+    const timestamps = candles.map(c => new Date(c.time).toISOString());
+    const oracleResult = evaluateOracleIntegrity({
+      prices, highs, lows, timestamps,
+      externalPrice: ticker.last,
+    });
+
+    if (!oracleResult.passed) {
+      log.warn(`[AGENT] Oracle integrity BLOCKED for ${symbol}: ${oracleResult.blockers.join(', ')}`);
+      await saveCheckpoint({ eventType: 'veto', symbol, agentId: config.agentId, signal: 'hold', data: { reason: 'oracle_integrity', blockers: oracleResult.blockers } });
+      return;
+    }
+
+    if (oracleResult.status === 'watch') {
+      log.info(`[AGENT] Oracle watch for ${symbol}: ${oracleResult.reasons.join(', ')}`);
+    }
+
+    // 3. Ensemble strategy (6 ICT/SMC strategies with priority hierarchy)
     const ensemble = runEnsemble(candles, symbol);
     let signal = ensemble.signal;
     _totalSignals++;
 
-    // 3. Neuro-symbolic reasoning
+    // 4. Neuro-symbolic reasoning
     const stats = getTradeStats(symbol);
     const cognitiveCtx = {
       consecutiveLosses: _getConsecutiveLosses(symbol),
@@ -146,7 +201,7 @@ async function processSymbol(symbol: string): Promise<void> {
     const cognitive = applySymbolicReasoning(signal, candles, cognitiveCtx);
     signal = cognitive.adjustedSignal;
 
-    // 4. Sentiment + PRISM modifiers
+    // 5. Sentiment + PRISM confidence modifiers
     const [sentiment, prism] = await Promise.all([
       fetchSentiment(symbol).catch(() => null),
       fetchPrismData(symbol).catch(() => null),
@@ -160,6 +215,16 @@ async function processSymbol(symbol: string): Promise<void> {
       signal = { ...signal, confidence: Math.min(0.95, signal.confidence + prismConfidenceModifier(signal, prism)) };
     }
 
+    // 6. Adaptive learning context bias
+    const contextBias = getContextConfidenceBias({
+      regime: _mapVolatilityRegime(ensemble.regime?.volatilityRegime),
+      direction: signal.direction === 'sell' ? 'sell' : 'buy',
+      confidence: signal.confidence,
+    });
+    if (Math.abs(contextBias) > 0.01) {
+      signal = { ...signal, confidence: Math.min(0.95, Math.max(0, signal.confidence + contextBias)) };
+    }
+
     recordSignal(symbol, signal.direction);
     log.info(`[AGENT] ${symbol} | ${signal.direction.toUpperCase()} | conf=${(signal.confidence * 100).toFixed(0)}% | ${signal.strategy}`);
 
@@ -168,11 +233,11 @@ async function processSymbol(symbol: string): Promise<void> {
       return;
     }
 
-    // 5. Trust computation
+    // 7. Trust computation
     const integrity = verifyChain();
-    const cpStats   = getCheckpointStats();
-    const trStats   = getTradeStats();
-    const metrics   = risk.getMetrics();
+    const cpStats = getCheckpointStats();
+    const trStats = getTradeStats();
+    const metrics = risk.getMetrics();
 
     const trust = computeTrust({
       identityAgeDays: _identity?.identityAgeDays ?? null,
@@ -184,7 +249,18 @@ async function processSymbol(symbol: string): Promise<void> {
       recentWinRate: trStats.total > 0 ? trStats.winRate : null,
     });
 
-    // 6. Risk validation
+    const trustScoreNormalized = trust.score * 100;
+
+    // Record trust observation for reputation evolution
+    recordTrustObservation({
+      agentId: config.agentId,
+      trustScore: trustScoreNormalized,
+      previousScore: _prevTrustScore,
+      regime: _mapMarketRegimeToHint(signal.regime),
+    });
+    _prevTrustScore = trustScoreNormalized;
+
+    // 8. Risk validation
     const riskDecision = risk.validate(signal, symbol, trust.sizeFactor);
 
     if (riskDecision.halted) {
@@ -202,9 +278,43 @@ async function processSymbol(symbol: string): Promise<void> {
       return;
     }
 
-    // 7. Trust policy scorecard
+    // 9. Agent mandate check
+    const mandateDecision = evaluateMandate({
+      signal,
+      positionSize: riskDecision.positionSize,
+      capitalUsd: metrics.equity,
+      asset: symbol.replace('USD', ''),
+      protocol: 'kraken',
+      dailyPnlPct: metrics.dailyPnl / metrics.equity,
+    });
+
+    if (!mandateDecision.approved) {
+      log.info(`[AGENT] Mandate veto for ${symbol}: ${mandateDecision.reasons.join(', ')}`);
+      _mandateViolations++;
+      _vetoCount++;
+      await saveCheckpoint({ eventType: 'veto', symbol, agentId: config.agentId, signal: signal.direction, data: { reason: 'mandate', details: mandateDecision.reasons } });
+      return;
+    }
+
+    // 10. Execution simulation (slippage + net edge check)
+    const simResult = simulateExecution({
+      signal,
+      riskDecision,
+      positionSize: riskDecision.positionSize,
+      volatility: ensemble.regime?.adx ? ensemble.regime.adx / 100 : 0.02,
+      volatilityRegime: _mapVolatilityRegime(ensemble.regime?.volatilityRegime) === 'extreme' ? 'extreme' : undefined,
+    });
+
+    if (!simResult.allowed) {
+      log.info(`[AGENT] Execution simulation blocked for ${symbol}: ${simResult.reason}`);
+      _vetoCount++;
+      await saveCheckpoint({ eventType: 'veto', symbol, agentId: config.agentId, signal: signal.direction, data: { reason: `simulation_${simResult.reason}` } });
+      return;
+    }
+
+    // 11. Trust policy scorecard
     const scorecard = buildTrustPolicyScorecard({
-      mandateViolations: 0,
+      mandateViolations: _mandateViolations,
       vetoedTrades: _vetoCount,
       totalSignals: _totalSignals,
       maxDrawdownPct: metrics.drawdown,
@@ -212,7 +322,7 @@ async function processSymbol(symbol: string): Promise<void> {
       dailyLossBreaches: _dailyLossBreaches,
       circuitBreakerTrips: _circuitBreakerTrips,
       checkpointCount: cpStats.total ?? 0,
-      ipfsPinnedCount: 0,
+      ipfsPinnedCount: _ipfsPinnedCount,
       onChainAttestations: cpStats.signed ?? 0,
       checkpointChainValid: integrity.valid,
       winCount: trStats.wins,
@@ -221,11 +331,45 @@ async function processSymbol(symbol: string): Promise<void> {
       totalClosed: trStats.total,
     });
 
-    // 8. AI narrative (non-blocking on failure)
-    const narrative = await generateReasoning(signal, `Symbol: ${symbol} | Trust: ${scorecard.tier} | Cycle: ${getState().cycle}`).catch(() => null);
+    // 12. Supervisory meta-agent — final capital-rights gate
+    const supervisory = evaluateSupervisoryDecision({
+      trustScore: trustScoreNormalized,
+      drawdownPct: metrics.drawdown,
+      marketRegime: signal.regime,
+      edgeAllowed: simResult.expectedNetEdgePct > 0,
+      volatilityRegime: ensemble.regime?.volatilityRegime ?? null,
+      validationScore: scorecard.dimensions.validationCompleteness.score * 100,
+      currentOpenPositions: metrics.openPositions,
+      maxOpenPositions: config.maxPositions,
+    });
 
-    // 9. Execute
-    const finalSize = riskDecision.positionSize * scorecard.sizeFactor;
+    if (!supervisory.canTrade) {
+      log.info(`[AGENT] Supervisory block for ${symbol}: ${supervisory.restrictions.join(', ')}`);
+      await saveCheckpoint({ eventType: 'veto', symbol, agentId: config.agentId, signal: signal.direction, data: { reason: 'supervisory', restrictions: supervisory.restrictions } });
+      return;
+    }
+
+    // 13. AI narrative (non-blocking)
+    const narrative = await generateReasoning(
+      signal,
+      `Symbol: ${symbol} | Trust: ${scorecard.tier} | Tier: ${supervisory.trustTier} | Cycle: ${getState().cycle}`,
+    ).catch(() => null);
+
+    // 14. Apply supervisory sizing on top of risk manager sizing
+    const riskSizedUnits = riskDecision.positionSize * scorecard.sizeFactor;
+    const finalSize = applySupervisorySizing(
+      riskSizedUnits,
+      metrics.equity,
+      signal.price,
+      supervisory,
+    );
+
+    if (finalSize <= 0) {
+      log.info(`[AGENT] Zero-size after supervisory sizing for ${symbol} — skipping`);
+      return;
+    }
+
+    // 15. Execute
     const orderResult = await placeOrder({
       symbol,
       direction: signal.direction as 'buy' | 'sell',
@@ -239,10 +383,9 @@ async function processSymbol(symbol: string): Promise<void> {
       return;
     }
 
-    // Track in risk manager
     const position = risk.openPosition(symbol, signal, { ...riskDecision, positionSize: finalSize }, signal.atr ?? null);
 
-    // 10. Build artifact
+    // 16. Build artifact
     const artifact = buildArtifact({
       eventType: 'trade',
       symbol,
@@ -257,27 +400,41 @@ async function processSymbol(symbol: string): Promise<void> {
       dailyPnl: metrics.dailyPnl,
     });
 
-    // 11. Checkpoint
+    // 17. Checkpoint
     const cp = await saveCheckpoint({
       eventType: 'trade',
       symbol,
       agentId: config.agentId,
       signal: signal.direction,
-      data: { strategy: signal.strategy, confidence: signal.confidence, price: signal.price, positionId: position.id },
+      data: {
+        strategy: signal.strategy,
+        confidence: signal.confidence,
+        price: signal.price,
+        positionId: position.id,
+        supervisoryTier: supervisory.trustTier,
+        capitalMultiplier: supervisory.capitalMultiplier,
+        simSlippageBps: simResult.estimatedSlippageBps,
+        netEdgePct: simResult.expectedNetEdgePct,
+      },
     });
 
     artifact.checkpointHash = cp.hash;
     artifact.checkpointSignature = cp.signature;
 
-    // 12. IPFS + on-chain (async, non-blocking)
+    // 18. IPFS + on-chain (async, non-blocking)
     if (config.pinataJwt) {
-      pinArtifact(artifact).then(r => { if (r) log.info(`[AGENT] IPFS: ${r.cid}`); }).catch(() => {});
+      pinArtifact(artifact).then(r => {
+        if (r) {
+          log.info(`[AGENT] IPFS: ${r.cid}`);
+          _ipfsPinnedCount++;
+        }
+      }).catch(() => {});
     }
     if (config.validationRegistry && cp.signature && config.agentId != null) {
       postCheckpointOnChain({ agentId: config.agentId, dataHash: cp.hash, signature: cp.signature }).catch(() => {});
     }
 
-    log.info(`[AGENT] Trade opened: ${symbol} ${signal.direction.toUpperCase()} size=${finalSize.toFixed(6)} @ ${signal.price.toFixed(4)} | CP#${cp.id}`);
+    log.info(`[AGENT] Trade opened: ${symbol} ${signal.direction.toUpperCase()} size=${finalSize.toFixed(6)} @ ${signal.price.toFixed(4)} | tier=${supervisory.trustTier} | CP#${cp.id}`);
 
   } catch (e) {
     log.error(`[AGENT] processSymbol(${symbol}) error: ${e}`);
@@ -311,6 +468,18 @@ async function checkManagedPositions(): Promise<void> {
       const won = closed.pnl > 0;
       recordTrade(pos.symbol, won);
       if (reason === 'stop_loss') _stopHitCount++;
+
+      // Record outcome for adaptive learning
+      recordTradeOutcome({
+        direction: pos.side,
+        entryPrice: pos.entryPrice,
+        exitPrice: price,
+        pnlPct: closed.pnlPct,
+        stopHit: reason === 'stop_loss',
+        regime: 'normal',
+        confidence: 0.5,
+        timestamp: new Date().toISOString(),
+      });
 
       const trade: ClosedTrade = {
         tradeId: generateTradeId(pos.symbol),
@@ -373,12 +542,12 @@ async function runHeartbeat(): Promise<void> {
 // ── State broadcast ───────────────────────────────────────────────────────────
 
 function broadcastState(): void {
-  const state   = getState();
+  const state = getState();
   const metrics = risk.getMetrics();
   const trStats = getTradeStats();
-
   const integrity = verifyChain();
-  const cpStats   = getCheckpointStats();
+  const cpStats = getCheckpointStats();
+  const opState = getOperatorControlState();
 
   const trust = computeTrust({
     identityAgeDays: _identity?.identityAgeDays ?? null,
@@ -391,7 +560,7 @@ function broadcastState(): void {
   });
 
   const scorecard = buildTrustPolicyScorecard({
-    mandateViolations: 0,
+    mandateViolations: _mandateViolations,
     vetoedTrades: _vetoCount,
     totalSignals: _totalSignals,
     maxDrawdownPct: metrics.drawdown,
@@ -399,7 +568,7 @@ function broadcastState(): void {
     dailyLossBreaches: _dailyLossBreaches,
     circuitBreakerTrips: _circuitBreakerTrips,
     checkpointCount: cpStats.total ?? 0,
-    ipfsPinnedCount: 0,
+    ipfsPinnedCount: _ipfsPinnedCount,
     onChainAttestations: cpStats.signed ?? 0,
     checkpointChainValid: integrity.valid,
     winCount: trStats.wins,
@@ -414,17 +583,19 @@ function broadcastState(): void {
     haltReason: state.haltReason,
     executionMode: config.executionMode,
     agentId: config.agentId,
+    operatorMode: opState.mode,
     riskMetrics: {
       equity: metrics.equity,
       dailyPnl: metrics.dailyPnl,
       drawdown: metrics.drawdown,
       openPositions: metrics.openPositions,
-      status: state.halted ? 'halted' : metrics.status,
+      status: state.halted ? 'halted' : opState.mode !== 'normal' ? opState.mode : metrics.status,
     },
     trust: {
       overall: scorecard.overall,
       tier: scorecard.tier,
       sizeFactor: scorecard.sizeFactor,
+      dimensions: scorecard.dimensions,
     },
     signals: Object.entries(state.symbols).map(([sym, s]) => ({
       symbol: sym,
@@ -432,6 +603,12 @@ function broadcastState(): void {
       confidence: 0,
       reasoning: `Last signal: ${s.lastSignalTime ?? 'none'}`,
     })),
+    governance: {
+      mandateViolations: _mandateViolations,
+      vetoedTrades: _vetoCount,
+      totalSignals: _totalSignals,
+      ipfsPinnedCount: _ipfsPinnedCount,
+    },
   };
 
   injectDashboard(shared);
@@ -450,6 +627,18 @@ function _mapReason(reason: string): ClosedTrade['exitReason'] {
   if (reason === 'trailing')    return 'trailing';
   if (reason === 'halt')        return 'halt';
   return 'signal';
+}
+
+function _mapVolatilityRegime(regime?: string | null): 'low' | 'normal' | 'high' | 'extreme' {
+  if (regime === 'low' || regime === 'high' || regime === 'extreme') return regime;
+  return 'normal';
+}
+
+function _mapMarketRegimeToHint(regime: string): 'TRENDING' | 'RANGING' | 'STRESSED' | 'UNKNOWN' {
+  if (regime === 'trending_up' || regime === 'trending_down') return 'TRENDING';
+  if (regime === 'ranging') return 'RANGING';
+  if (regime === 'volatile') return 'STRESSED';
+  return 'UNKNOWN';
 }
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────

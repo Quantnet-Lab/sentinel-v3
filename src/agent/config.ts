@@ -68,6 +68,16 @@ export const config = {
     minConfidence:        0.5,
   },
 
+  // ── Mandate / Governance ──────────────────────────────────────────────────
+  tradingPair:                process.env.TRADING_PAIR || 'BTCUSD',
+  allowedAssets:              (process.env.ALLOWED_ASSETS || 'BTC,ETH,SOL').split(',').map(s => s.trim()),
+  allowedProtocols:           (process.env.ALLOWED_PROTOCOLS || 'kraken,uniswap').split(',').map(s => s.trim()),
+  restrictedAssets:           (process.env.RESTRICTED_ASSETS || '').split(',').map(s => s.trim()).filter(Boolean),
+  restrictedProtocols:        (process.env.RESTRICTED_PROTOCOLS || '').split(',').map(s => s.trim()).filter(Boolean),
+  requireHumanApprovalAboveUsd: parseFloat(process.env.REQUIRE_HUMAN_APPROVAL_USD || '50000'),
+  validatorAddress:           process.env.VALIDATOR_ADDRESS || '',
+  preferredReviewerAddresses: (process.env.PREFERRED_REVIEWER_ADDRESSES || '').split(',').map(s => s.trim()).filter(Boolean),
+
   // ── Dashboard / MCP ───────────────────────────────────────────────────────
   dashboardPort: parseInt(process.env.DASHBOARD_PORT || '3000'),
   mcpPort:       parseInt(process.env.MCP_PORT || '3001'),
