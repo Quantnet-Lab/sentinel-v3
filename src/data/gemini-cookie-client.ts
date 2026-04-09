@@ -226,7 +226,7 @@ export async function askGeminiWithCookies(
     }
     return result.content ?? null;
   } catch (err) {
-    log.warn(`Gemini cookie client threw: ${err}`);
+    log.debug(`Gemini cookie client unavailable: ${err}`);
     return null;
   }
 }

@@ -462,8 +462,9 @@ async function checkManagedPositions(): Promise<void> {
 
   for (const pos of positions) {
     try {
-      const ticker = await fetchTicker(pos.symbol);
-      const price = ticker.last;
+      const tickerMap = await fetchTicker([pos.symbol]);
+      const price = tickerMap[pos.symbol]?.price;
+      if (!price) continue;
 
       risk.updateTrailingStop(pos.id, price);
 
