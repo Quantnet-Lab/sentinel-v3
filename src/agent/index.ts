@@ -317,7 +317,7 @@ async function processSymbol(symbol: string): Promise<void> {
       signal,
       riskDecision,
       positionSize: riskDecision.positionSize,
-      volatility: ensembleResult.regimeSignal?.adx ? ensembleResult.regimeSignal.adx / 100 : 0.02,
+      volatility: 0.02, // ~2% daily vol baseline (ADX is trend strength, not volatility)
       volatilityRegime: _mapVolatilityRegime(ensembleResult.regimeSignal?.volatilityRegime) === 'extreme' ? 'extreme' : undefined,
     });
 
