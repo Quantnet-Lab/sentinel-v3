@@ -8,6 +8,7 @@
  * Uses node-cron for precise scheduling and tracks cycle timing.
  */
 
+// @ts-ignore — no @types/node-cron available
 import cron from 'node-cron';
 import { createLogger } from './logger.js';
 import { config } from './config.js';

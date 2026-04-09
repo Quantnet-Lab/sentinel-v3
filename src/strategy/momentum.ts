@@ -4,7 +4,7 @@
  */
 
 import type { Candle, TradeSignal, MarketRegime } from './types.js';
-import { closes, ema, macd, rsiLast, atrLast, HOLD_SIGNAL } from '../strategy/indicators.js';
+import { closes, ema, macd, rsiLast, atrLast } from '../strategy/indicators.js';
 import { HOLD_SIGNAL as makeHold } from './types.js';
 
 export class MomentumStrategy {

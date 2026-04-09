@@ -234,7 +234,7 @@ async function processSymbol(symbol: string): Promise<void> {
       fetchPrismData(symbol).catch(() => null),
     ]);
 
-    if (sentiment) _lastSentiment = sentiment as Record<string, unknown>;
+    if (sentiment) _lastSentiment = sentiment as unknown as Record<string, unknown>;
     if (sentiment && Math.abs(sentiment.composite) > 0.6) {
       const boost = sentiment.composite > 0 ? 0.05 : -0.05;
       signal = { ...signal, confidence: Math.min(0.95, signal.confidence + boost) };
@@ -452,7 +452,7 @@ async function processSymbol(symbol: string): Promise<void> {
 
     // 18. IPFS + on-chain (async, non-blocking)
     if (config.pinataJwt) {
-      pinArtifact(artifact).then(r => {
+      pinArtifact(artifact, `sentinel-${symbol}-${Date.now()}`).then(r => {
         if (r) {
           log.info(`[AGENT] IPFS: ${r.cid}`);
           _ipfsPinnedCount++;

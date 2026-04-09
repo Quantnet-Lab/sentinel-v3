@@ -43,15 +43,15 @@ async function fetchViaREST(symbol: string, intervalMinutes: number, limit: numb
     if (data.error?.length) throw new Error(data.error[0]);
 
     const key = Object.keys(data.result).find(k => k !== 'last')!;
-    const raw: number[][] = data.result[key];
+    const raw: any[][] = data.result[key];
 
     return raw.slice(-limit).map(c => ({
-      time:   c[0] * 1000,
-      open:   parseFloat(c[1]),
-      high:   parseFloat(c[2]),
-      low:    parseFloat(c[3]),
-      close:  parseFloat(c[4]),
-      volume: parseFloat(c[6]),
+      time:   Number(c[0]) * 1000,
+      open:   parseFloat(String(c[1])),
+      high:   parseFloat(String(c[2])),
+      low:    parseFloat(String(c[3])),
+      close:  parseFloat(String(c[4])),
+      volume: parseFloat(String(c[6])),
     }));
   } catch (e) {
     log.warn(`[MARKET] REST fetch failed for ${symbol}: ${e}`);

@@ -51,10 +51,10 @@ export async function verifyEIP1271Signature(
   try {
     const result: string = await contract.isValidSignature(hash, signature);
     const isValid = result.toLowerCase() === EIP1271_MAGIC_VALUE;
-    log.info('EIP-1271 verification', { contract: contractAddress, valid: isValid, returnedValue: result });
+    log.info(`EIP-1271 verification contract=${contractAddress} valid=${isValid} returned=${result}`);
     return isValid;
   } catch (error) {
-    log.warn('EIP-1271 call failed', { contract: contractAddress, error: String(error) });
+    log.warn(`EIP-1271 call failed contract=${contractAddress} error=${String(error)}`);
     return false;
   }
 }
