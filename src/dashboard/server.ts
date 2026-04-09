@@ -1,18 +1,18 @@
 /**
  * Sentinel Dashboard Server
- * Serves the live proof dashboard with checkpoint verification,
- * signal history, risk metrics, and trust scorecard.
  */
 
 import express from 'express';
 import cors from 'cors';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createReadStream } from 'fs';
 import { createLogger } from '../agent/logger.js';
 import { config } from '../agent/config.js';
 import { getCheckpoints, getCheckpointStats, verifyChain } from '../trust/checkpoint.js';
 import { getRecentLogs } from '../agent/logger.js';
 import { getSAGEStatus } from '../strategy/sage-engine.js';
+import { getClosedTrades, getTradeStats } from '../agent/trade-log.js';
 
 const log = createLogger('DASHBOARD');
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -28,6 +28,13 @@ export function startDashboard(): void {
   app.use(express.json());
   app.use(express.static(join(__dirname, 'public')));
 
+  // Serve the React dashboard JSX component
+  app.get('/dashboard-app.jsx', (_, res) => {
+    res.setHeader('Content-Type', 'application/javascript');
+    const p = join(__dirname, 'SentinelDashboard.jsx');
+    createReadStream(p).pipe(res);
+  });
+
   // ── API routes ──────────────────────────────────────────────────────────────
 
   app.get('/api/status', (_, res) => {
@@ -37,6 +44,7 @@ export function startDashboard(): void {
       version: '3.0',
       executionMode: config.executionMode,
       symbols: config.symbols,
+      testMode: config.testMode,
       ..._agentState,
     });
   });
@@ -66,6 +74,17 @@ export function startDashboard(): void {
     res.json((_agentState as any).signals ?? []);
   });
 
+  app.get('/api/positions', (_, res) => {
+    res.json((_agentState as any).positions ?? []);
+  });
+
+  app.get('/api/trades', (req, res) => {
+    const limit = parseInt((req.query.limit as string) ?? '20');
+    const trades = getClosedTrades().slice(-limit).reverse();
+    const stats = getTradeStats();
+    res.json({ trades, stats });
+  });
+
   app.get('/api/sage', (_, res) => {
     res.json(getSAGEStatus());
   });
@@ -73,6 +92,10 @@ export function startDashboard(): void {
   app.get('/api/logs', (req, res) => {
     const limit = parseInt((req.query.limit as string) ?? '100');
     res.json(getRecentLogs().slice(-limit));
+  });
+
+  app.get('/api/governance', (_, res) => {
+    res.json((_agentState as any).governance ?? {});
   });
 
   app.get('/api/verify-checkpoints', (_, res) => {

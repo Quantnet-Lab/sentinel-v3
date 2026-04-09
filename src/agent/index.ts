@@ -604,7 +604,9 @@ function broadcastState(): void {
     haltReason: state.haltReason,
     executionMode: config.executionMode,
     agentId: config.agentId,
+    agentName: config.agentName,
     operatorMode: opState.mode,
+    positions: risk.getPositions(),
     riskMetrics: {
       equity: metrics.equity,
       dailyPnl: metrics.dailyPnl,
