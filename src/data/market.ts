@@ -71,7 +71,7 @@ async function fetchViaCLI(symbol: string, intervalMinutes: number, limit: numbe
   try {
     const stdout = execSync(
       `${bin} -o json ohlc ${pair} --interval ${intervalMinutes}`,
-      { timeout: 15000, env: { ...process.env, KRAKEN_API_KEY: config.krakenApiKey, KRAKEN_API_SECRET: config.krakenApiSecret } },
+      { timeout: 3000, env: { ...process.env, KRAKEN_API_KEY: config.krakenApiKey, KRAKEN_API_SECRET: config.krakenApiSecret } },
     ).toString();
 
     const data = JSON.parse(stdout);
@@ -94,7 +94,7 @@ async function fetchViaCLI(symbol: string, intervalMinutes: number, limit: numbe
 export async function fetchTicker(symbols: string[]): Promise<Record<string, { price: number; change24hPct: number }>> {
   const pairs = symbols.map(krakenPair).join(',');
   try {
-    const resp = await fetch(`${KRAKEN_REST}/Ticker?pair=${pairs}`, { signal: AbortSignal.timeout(8000) });
+    const resp = await fetch(`${KRAKEN_REST}/Ticker?pair=${pairs}`, { signal: AbortSignal.timeout(15000) });
     const data: any = await resp.json();
     if (data.error?.length) throw new Error(data.error[0]);
 

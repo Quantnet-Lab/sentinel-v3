@@ -158,10 +158,11 @@ async function runCycle(): Promise<void> {
 async function processSymbol(symbol: string): Promise<void> {
   try {
     // 1. Market data
-    const [candles, ticker] = await Promise.all([
-      fetchCandles(symbol, '15', 100),
-      fetchTicker(symbol),
+    const [candles, tickerMap] = await Promise.all([
+      fetchCandles(symbol, 15, 100),
+      fetchTicker([symbol]),
     ]);
+    const ticker = tickerMap[symbol] ?? null;
 
     if (candles.length < 50) {
       log.warn(`[AGENT] Insufficient candles for ${symbol}: ${candles.length}`);
@@ -175,7 +176,7 @@ async function processSymbol(symbol: string): Promise<void> {
     const timestamps = candles.map(c => new Date(c.time).toISOString());
     const oracleResult = evaluateOracleIntegrity({
       prices, highs, lows, timestamps,
-      externalPrice: ticker.last,
+      externalPrice: ticker?.price ?? null,
     });
 
     if (!oracleResult.passed) {
@@ -368,10 +369,8 @@ async function processSymbol(symbol: string): Promise<void> {
     // 15. Execute
     const orderResult = await placeOrder({
       symbol,
-      direction: signal.direction as 'buy' | 'sell',
-      size: finalSize,
-      stopLoss: riskDecision.stopLoss ?? undefined,
-      takeProfit: riskDecision.takeProfit ?? undefined,
+      side: signal.direction as 'buy' | 'sell',
+      volume: finalSize,
     });
 
     if (!orderResult.success) {
@@ -454,8 +453,8 @@ async function checkManagedPositions(): Promise<void> {
 
       await placeOrder({
         symbol: pos.symbol,
-        direction: pos.side === 'buy' ? 'sell' : 'buy',
-        size: pos.size,
+        side: pos.side === 'buy' ? 'sell' : 'buy',
+        volume: pos.size,
       });
 
       const closed = risk.closePosition(pos.id, price);

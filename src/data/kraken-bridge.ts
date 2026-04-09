@@ -1,5 +1,9 @@
 /**
- * Kraken execution bridge — wraps kraken-cli for paper/live order placement.
+ * Kraken execution bridge — paper simulation + live order placement via CLI.
+ *
+ * Paper mode runs entirely in-process (no CLI required).
+ * Live mode shells out to the kraken CLI with API credentials.
+ * Disabled mode returns a dry-run success without touching anything.
  */
 
 import { execSync } from 'child_process';
@@ -20,19 +24,48 @@ export interface OrderResult {
   raw: Record<string, unknown> | null;
 }
 
+// ── Internal paper account ────────────────────────────────────────────────────
+
+interface PaperState {
+  balanceUsd: number;
+  positions: Record<string, number>;
+  initialised: boolean;
+}
+
+const _paper: PaperState = { balanceUsd: 0, positions: {}, initialised: false };
+
+export async function initPaperAccount(balance = 10000): Promise<boolean> {
+  if (config.executionMode !== 'paper') return true;
+  _paper.balanceUsd = balance;
+  _paper.initialised = true;
+  log.info(`[KRAKEN] Paper account initialised — balance: $${balance.toFixed(2)}`);
+  return true;
+}
+
+// ── Pair mapping ──────────────────────────────────────────────────────────────
+
 const PAIR_MAP: Record<string, string> = {
-  BTCUSD: 'XBTUSD', ETHUSD: 'ETHUSD', SOLUSD: 'SOLUSD',
-  DOGEUSD: 'DOGEUSD', LINKUSD: 'LINKUSD', PEPEUSD: 'PEPEUSD',
+  BTCUSD:  'XBTUSD',
+  ETHUSD:  'ETHUSD',
+  SOLUSD:  'SOLUSD',
+  DOGEUSD: 'DOGEUSD',
+  LINKUSD: 'LINKUSD',
+  PEPEUSD: 'PEPEUSD',
 };
 
 function pair(symbol: string): string {
   return PAIR_MAP[symbol.toUpperCase()] ?? symbol;
 }
 
+// ── Live CLI helper ───────────────────────────────────────────────────────────
+
 function runKraken(args: string[]): { ok: boolean; data: any; error: string } {
   const bin = config.krakenCliPath;
-  const env = { ...process.env, KRAKEN_API_KEY: config.krakenApiKey, KRAKEN_API_SECRET: config.krakenApiSecret };
-
+  const env = {
+    ...process.env,
+    KRAKEN_API_KEY:    config.krakenApiKey,
+    KRAKEN_API_SECRET: config.krakenApiSecret,
+  };
   try {
     const stdout = execSync(
       `${bin} -o json ${args.join(' ')}`,
@@ -47,18 +80,7 @@ function runKraken(args: string[]): { ok: boolean; data: any; error: string } {
   }
 }
 
-export async function initPaperAccount(balance = 10000): Promise<boolean> {
-  const check = runKraken(['paper', 'status']);
-  if (check.ok) return true;
-
-  const init = runKraken(['paper', 'init', '--balance', String(balance), '--currency', 'USD', '--fee-rate', '0.0026', '--yes']);
-  if (init.ok) {
-    log.info(`[KRAKEN] Paper account initialized with $${balance}`);
-    return true;
-  }
-  log.warn(`[KRAKEN] Paper init failed: ${init.error}`);
-  return false;
-}
+// ── Order placement ───────────────────────────────────────────────────────────
 
 export async function placeOrder(params: {
   symbol: string;
@@ -68,14 +90,32 @@ export async function placeOrder(params: {
   price?: number;
 }): Promise<OrderResult> {
   const mode = config.executionMode;
+  const p    = pair(params.symbol);
+
+  // Disabled — dry run, no side effects
   if (mode === 'disabled') {
-    return { success: true, mode, side: params.side, pair: pair(params.symbol), volume: params.volume, txid: `sim_${Date.now()}`, fillPrice: params.price ?? null, error: null, raw: null };
+    return {
+      success: true, mode, side: params.side, pair: p,
+      volume: params.volume, txid: `sim_${Date.now()}`,
+      fillPrice: params.price ?? null, error: null, raw: null,
+    };
   }
 
-  const prefix = mode === 'paper' ? ['paper'] : [];
+  // Paper — in-process simulation
+  if (mode === 'paper') {
+    const txid = `paper_${Date.now()}`;
+    log.info(`[KRAKEN] PAPER ${params.side.toUpperCase()} ${params.volume.toFixed(6)} ${params.symbol} — txid=${txid}`);
+    return {
+      success: true, mode, side: params.side, pair: p,
+      volume: params.volume, txid, fillPrice: params.price ?? null,
+      error: null, raw: null,
+    };
+  }
+
+  // Live — shell out to kraken CLI
   const orderArgs = [
-    ...prefix, 'order', 'add',
-    '--pair', pair(params.symbol),
+    'order', 'add',
+    '--pair', p,
     '--type', params.side,
     '--ordertype', params.orderType ?? 'market',
     '--volume', String(params.volume),
@@ -86,26 +126,34 @@ export async function placeOrder(params: {
   orderArgs.push('--yes');
 
   const result = runKraken(orderArgs);
-
   if (!result.ok) {
-    log.warn(`[KRAKEN] Order failed: ${result.error}`);
-    return { success: false, mode, side: params.side, pair: pair(params.symbol), volume: params.volume, txid: null, fillPrice: null, error: result.error, raw: result.data };
+    log.warn(`[KRAKEN] Live order failed: ${result.error}`);
+    return {
+      success: false, mode, side: params.side, pair: p,
+      volume: params.volume, txid: null, fillPrice: null,
+      error: result.error, raw: result.data,
+    };
   }
 
   const txid = result.data?.txid?.[0] ?? null;
-  log.info(`[KRAKEN] ${mode.toUpperCase()} ${params.side.toUpperCase()} ${params.volume} ${params.symbol} @ market — txid=${txid}`);
-  return { success: true, mode, side: params.side, pair: pair(params.symbol), volume: params.volume, txid, fillPrice: null, error: null, raw: result.data };
+  log.info(`[KRAKEN] LIVE ${params.side.toUpperCase()} ${params.volume} ${params.symbol} @ market — txid=${txid}`);
+  return {
+    success: true, mode, side: params.side, pair: p,
+    volume: params.volume, txid, fillPrice: null, error: null, raw: result.data,
+  };
 }
 
+// ── Misc helpers ──────────────────────────────────────────────────────────────
+
 export async function getAccountSnapshot(): Promise<Record<string, number>> {
-  const mode = config.executionMode;
-  const prefix = mode === 'paper' ? ['paper'] : [];
-  const result = runKraken([...prefix, 'balance']);
-  if (!result.ok) return {};
-  return result.data ?? {};
+  if (config.executionMode === 'paper') {
+    return { USD: _paper.balanceUsd };
+  }
+  const result = runKraken(['balance']);
+  return result.ok ? (result.data ?? {}) : {};
 }
 
 export async function getCLIStatus(): Promise<boolean> {
-  const result = runKraken(['status']);
-  return result.ok;
+  if (config.executionMode !== 'live') return true;
+  return runKraken(['status']).ok;
 }
