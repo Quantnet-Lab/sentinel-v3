@@ -12,7 +12,8 @@ export type StrategyName =
   | 'engulfing'
   | 'momentum'
   | 'mean_reversion'
-  | 'ensemble';
+  | 'ensemble'
+  | 'test_inject';
 
 export interface Candle {
   time: number;   // unix ms

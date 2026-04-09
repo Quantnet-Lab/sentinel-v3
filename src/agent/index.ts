@@ -194,6 +194,25 @@ async function processSymbol(symbol: string): Promise<void> {
     let signal = ensembleResult.tradeSignal;
     _totalSignals++;
 
+    // TEST MODE: inject a synthetic signal when ensemble returns HOLD so the
+    // full downstream pipeline (mandate→sim→supervisory→order→checkpoint) runs.
+    if (config.testMode && signal.direction === 'hold') {
+      const price = candles.at(-1)!.close;
+      const atr   = price * 0.01; // 1% synthetic ATR
+      signal = {
+        direction:  'buy',
+        confidence: 0.72,
+        strategy:   'test_inject',
+        price,
+        stopLoss:   price - atr * 2,
+        takeProfit: price + atr * 3,
+        reasoning:  '[TEST MODE] Synthetic signal — bypasses kill zone for pipeline verification',
+        regime:     ensembleResult.regimeSignal.regime,
+        timestamp:  new Date().toISOString(),
+      };
+      log.warn(`[AGENT] TEST MODE: injected BUY signal for ${symbol} @ ${price.toFixed(2)}`);
+    }
+
     // 4. Neuro-symbolic reasoning
     const cognitive = applySymbolicReasoning(signal);
     signal = cognitive.adjustedSignal;
@@ -378,7 +397,7 @@ async function processSymbol(symbol: string): Promise<void> {
       return;
     }
 
-    const position = risk.openPosition(symbol, signal, { ...riskDecision, positionSize: finalSize }, signal.atr ?? null);
+    const position = risk.openPosition(symbol, signal, { ...riskDecision, positionSize: finalSize }, null);
 
     // 16. Build artifact
     const artifact = buildArtifact({

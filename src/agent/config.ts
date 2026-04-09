@@ -84,6 +84,9 @@ export const config = {
   dashboardPort: parseInt(process.env.DASHBOARD_PORT || '3000'),
   mcpPort:       parseInt(process.env.MCP_PORT || '3001'),
   dashboardUrl:  process.env.DASHBOARD_URL || 'http://localhost:3000',
+
+  // ── Test / Dev ────────────────────────────────────────────────────────────
+  testMode: process.env.TEST_MODE === 'true',
 } as const;
 
 export type Config = typeof config;
