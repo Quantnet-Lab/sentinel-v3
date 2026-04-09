@@ -16,7 +16,7 @@ const BASE_URL = 'https://gemini.google.com';
 const API_URL = `${BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate`;
 
 const HEADERS: Record<string, string> = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
   'Host': 'gemini.google.com',
   'Origin': 'https://gemini.google.com',
@@ -53,27 +53,51 @@ export class GeminiCookieClient {
   }
 
   private async fetchAtToken(): Promise<void> {
-    const resp = await fetch(`${BASE_URL}/app`, {
-      headers: { ...HEADERS, Cookie: this.cookieHeader() },
-      signal: AbortSignal.timeout(15000),
-    });
+    // Try /app first, then / as fallback
+    const paths = ['/app', '/'];
 
-    if (!resp.ok) {
-      throw new Error(`Failed to fetch Gemini page. Status: ${resp.status}`);
+    for (const path of paths) {
+      const resp = await fetch(`${BASE_URL}${path}`, {
+        headers: { ...HEADERS, Cookie: this.cookieHeader() },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (!resp.ok) {
+        log.debug(`[GEMINI-COOKIE] ${path} returned ${resp.status}`);
+        continue;
+      }
+
+      const html = await resp.text();
+
+      // Try multiple known token patterns
+      const patterns = [
+        /SNlM0e":"(.*?)"/,
+        /"SNlM0e":"([^"]+)"/,
+        /at":"([\w-]+)"/,
+      ];
+
+      let token: string | null = null;
+      for (const pat of patterns) {
+        const m = html.match(pat);
+        if (m?.[1]) { token = m[1]; break; }
+      }
+
+      if (!token) {
+        log.debug(`[GEMINI-COOKIE] SNlM0e not found in ${path} (HTML len=${html.length}, status=${resp.status})`);
+        continue;
+      }
+
+      this.atToken = token;
+
+      const blMatch = html.match(/"cfb2h":"(.*?)"/);
+      if (blMatch) this.blLabel = blMatch[1];
+
+      log.info(`[GEMINI-COOKIE] Session token acquired via ${path}`);
+      return;
     }
 
-    const html = await resp.text();
-
-    const atMatch = html.match(/SNlM0e":"(.*?)"/);
-    if (!atMatch) {
-      throw new Error('Could not find SNlM0e token — cookies may be expired or invalid.');
-    }
-    this.atToken = atMatch[1];
-
-    const blMatch = html.match(/"cfb2h":"(.*?)"/);
-    if (blMatch) {
-      this.blLabel = blMatch[1];
-    }
+    throw new Error('Could not extract SNlM0e token — cookies may be expired or Gemini changed its page structure.');
   }
 
   async ask(prompt: string, isRetry = false): Promise<GeminiResponse> {
@@ -109,7 +133,7 @@ export class GeminiCookieClient {
       });
 
       if ((resp.status === 401 || resp.status === 403) && !isRetry) {
-        log.warn('Session potentially expired — refreshing at token');
+        log.debug('[GEMINI-COOKIE] Session expired — refreshing token');
         this.atToken = null;
         await this.fetchAtToken();
         return this.ask(prompt, true);
@@ -139,24 +163,17 @@ export class GeminiCookieClient {
         if (!chunk.trim()) continue;
 
         let data: any;
-        try {
-          data = JSON.parse(chunk);
-        } catch {
-          continue;
-        }
-
+        try { data = JSON.parse(chunk); } catch { continue; }
         if (!Array.isArray(data)) continue;
 
         for (const item of data) {
           if (!Array.isArray(item) || item.length === 0) continue;
 
-          // Error signals
           if (item[0] === 'e') {
             const code = item[item.length - 1] ?? 'unknown';
             return { error: `Google backend error (${code}) — session may be expired or IP blocked.` };
           }
 
-          // Main response wrapper
           if (item[0] === 'wrb.fr' && item[2] != null) {
             let inner: any;
             try { inner = JSON.parse(item[2]); } catch { continue; }
@@ -165,7 +182,6 @@ export class GeminiCookieClient {
               this.conversationId = inner[1][0] ?? '';
               this.responseId = inner[1][1] ?? '';
             }
-
             if (Array.isArray(inner?.[4]?.[0])) {
               const choice = inner[4][0];
               this.choiceId = choice[0] ?? '';
@@ -176,7 +192,6 @@ export class GeminiCookieClient {
             }
           }
 
-          // Alternative identifier
           if (item[0] === 'w69eS' && item[1]) {
             result.content = item[1];
             const meta = item[2];
@@ -193,7 +208,6 @@ export class GeminiCookieClient {
       }
 
       if (result.content) return result;
-
       return { error: 'Could not parse Gemini response — format may have changed.' };
     } catch (err) {
       return { error: `Parse exception: ${String(err)}` };
@@ -201,13 +215,17 @@ export class GeminiCookieClient {
   }
 }
 
-// ── Singleton ─────────────────────────────────────────────────────────────────
+// ── Singleton — recreated when cookies change ─────────────────────────────────
 
 let _client: GeminiCookieClient | null = null;
+let _cachedPsid = '';
+let _cachedPsidts = '';
 
 export function getGeminiCookieClient(psid: string, psidts: string): GeminiCookieClient {
-  if (!_client) {
+  if (!_client || psid !== _cachedPsid || psidts !== _cachedPsidts) {
     _client = new GeminiCookieClient(psid, psidts);
+    _cachedPsid = psid;
+    _cachedPsidts = psidts;
   }
   return _client;
 }
@@ -221,12 +239,29 @@ export async function askGeminiWithCookies(
     const client = getGeminiCookieClient(psid, psidts);
     const result = await client.ask(prompt);
     if (result.error) {
-      log.warn(`Gemini cookie client error: ${result.error}`);
+      log.warn(`Gemini cookie error: ${result.error}`);
       return null;
     }
     return result.content ?? null;
   } catch (err) {
-    log.debug(`Gemini cookie client unavailable: ${err}`);
+    log.warn(`Gemini cookie client failed: ${err}`);
     return null;
+  }
+}
+
+// ── Startup probe — called once at agent boot ─────────────────────────────────
+
+export async function probeGeminiCookieClient(psid: string, psidts: string): Promise<void> {
+  if (!psid || !psidts) return;
+  log.info('[GEMINI-COOKIE] Probing session...');
+  try {
+    const result = await askGeminiWithCookies('Reply with just the word: ready', psid, psidts);
+    if (result) {
+      log.info('[GEMINI-COOKIE] Session OK — AI narratives enabled');
+    } else {
+      log.warn('[GEMINI-COOKIE] Session probe returned empty — cookies may be expired');
+    }
+  } catch (err) {
+    log.warn(`[GEMINI-COOKIE] Session probe failed: ${err}`);
   }
 }
