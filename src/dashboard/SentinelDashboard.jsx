@@ -449,7 +449,7 @@ function Sentinel() {
                 <div>
                   <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:0, marginBottom:8, borderBottom:`1px solid ${T.brd}`, paddingBottom:6 }}>
                     <Metric label="Composite" value={fmt(comp)} sub={sentLabel(comp)} color={sc} />
-                    <Metric label="Fear&Greed" value={fgRaw???"—"} sub={fgLabel} color={fgRaw!=null?(fgRaw>60?T.up:fgRaw<40?T.dn:T.warn):T.fg3} />
+                    <Metric label="Fear&Greed" value={fgRaw != null ? String(fgRaw) : "—"} sub={fgLabel} color={fgRaw!=null?(fgRaw>60?T.up:fgRaw<40?T.dn:T.warn):T.fg3} />
                   </div>
                   {sentiment.newsSentiment != null && <KV k="News" v={fmt(sentiment.newsSentiment)} c={sentiment.newsSentiment>0.1?T.up:sentiment.newsSentiment<-0.1?T.dn:T.warn} />}
                   {sentiment.fundingRate   != null && <KV k="Funding" v={fmt(sentiment.fundingRate)} c={sentiment.fundingRate>0.1?T.up:sentiment.fundingRate<-0.1?T.dn:T.warn} />}
