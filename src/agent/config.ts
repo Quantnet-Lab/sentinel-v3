@@ -82,7 +82,7 @@ export const config = {
   preferredReviewerAddresses: (process.env.PREFERRED_REVIEWER_ADDRESSES || '').split(',').map(s => s.trim()).filter(Boolean),
 
   // ── Dashboard / MCP ───────────────────────────────────────────────────────
-  dashboardPort: parseInt(process.env.DASHBOARD_PORT || '3000'),
+  dashboardPort: parseInt(process.env.PORT || process.env.DASHBOARD_PORT || '3000'),
   mcpPort:       parseInt(process.env.MCP_PORT || '3001'),
   dashboardUrl:  process.env.DASHBOARD_URL || 'http://localhost:3000',
 

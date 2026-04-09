@@ -1,11 +1,8 @@
 [build]
 builder = "nixpacks"
-buildCommand = "npm install && npm run build"
+buildCommand = "npm install && npm run build && cp -r src/dashboard/public dist/dashboard/public && cp src/dashboard/SentinelDashboard.jsx dist/dashboard/SentinelDashboard.jsx"
 
 [deploy]
 startCommand = "npm start"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
-
-[environments.production.variables]
-NODE_ENV = "production"
