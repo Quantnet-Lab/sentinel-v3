@@ -51,7 +51,7 @@ import { pinArtifact } from '../trust/ipfs.js';
 import { fetchCandles, fetchTicker } from '../data/market.js';
 import { fetchSentiment } from '../data/sentiment-feed.js';
 import { fetchPrismData, prismConfidenceModifier } from '../data/prism-feed.js';
-import { runEnsemble } from '../strategy/ensemble.js';
+import { EnsembleStrategy } from '../strategy/ensemble.js';
 import { applySymbolicReasoning } from '../strategy/neuro-symbolic.js';
 import { generateReasoning } from '../strategy/ai-reasoning.js';
 import { runAdaptation, recordTradeOutcome, getContextConfidenceBias } from '../strategy/adaptive-learning.js';
@@ -79,6 +79,7 @@ const log = createLogger('AGENT');
 // ── Module singletons ─────────────────────────────────────────────────────────
 
 const risk = new RiskManager(config.initialCapital ?? 10000);
+const _ensemble = new EnsembleStrategy(config.strategy.minConfidence);
 
 let _identity: Awaited<ReturnType<typeof loadIdentity>> | null = null;
 
@@ -188,17 +189,12 @@ async function processSymbol(symbol: string): Promise<void> {
     }
 
     // 3. Ensemble strategy (6 ICT/SMC strategies with priority hierarchy)
-    const ensemble = runEnsemble(candles, symbol);
-    let signal = ensemble.signal;
+    const ensembleResult = _ensemble.analyze(candles);
+    let signal = ensembleResult.tradeSignal;
     _totalSignals++;
 
     // 4. Neuro-symbolic reasoning
-    const stats = getTradeStats(symbol);
-    const cognitiveCtx = {
-      consecutiveLosses: _getConsecutiveLosses(symbol),
-      winRate: stats.winRate,
-    };
-    const cognitive = applySymbolicReasoning(signal, candles, cognitiveCtx);
+    const cognitive = applySymbolicReasoning(signal);
     signal = cognitive.adjustedSignal;
 
     // 5. Sentiment + PRISM confidence modifiers
@@ -212,12 +208,12 @@ async function processSymbol(symbol: string): Promise<void> {
       signal = { ...signal, confidence: Math.min(0.95, signal.confidence + boost) };
     }
     if (prism) {
-      signal = { ...signal, confidence: Math.min(0.95, signal.confidence + prismConfidenceModifier(signal, prism)) };
+      signal = { ...signal, confidence: Math.min(0.95, signal.confidence + prismConfidenceModifier(prism, signal.direction as 'buy' | 'sell')) };
     }
 
     // 6. Adaptive learning context bias
     const contextBias = getContextConfidenceBias({
-      regime: _mapVolatilityRegime(ensemble.regime?.volatilityRegime),
+      regime: _mapVolatilityRegime(ensembleResult.regimeSignal?.volatilityRegime),
       direction: signal.direction === 'sell' ? 'sell' : 'buy',
       confidence: signal.confidence,
     });
@@ -301,8 +297,8 @@ async function processSymbol(symbol: string): Promise<void> {
       signal,
       riskDecision,
       positionSize: riskDecision.positionSize,
-      volatility: ensemble.regime?.adx ? ensemble.regime.adx / 100 : 0.02,
-      volatilityRegime: _mapVolatilityRegime(ensemble.regime?.volatilityRegime) === 'extreme' ? 'extreme' : undefined,
+      volatility: ensembleResult.regimeSignal?.adx ? ensembleResult.regimeSignal.adx / 100 : 0.02,
+      volatilityRegime: _mapVolatilityRegime(ensembleResult.regimeSignal?.volatilityRegime) === 'extreme' ? 'extreme' : undefined,
     });
 
     if (!simResult.allowed) {
@@ -337,7 +333,7 @@ async function processSymbol(symbol: string): Promise<void> {
       drawdownPct: metrics.drawdown,
       marketRegime: signal.regime,
       edgeAllowed: simResult.expectedNetEdgePct > 0,
-      volatilityRegime: ensemble.regime?.volatilityRegime ?? null,
+      volatilityRegime: ensembleResult.regimeSignal?.volatilityRegime ?? null,
       validationScore: scorecard.dimensions.validationCompleteness.score * 100,
       currentOpenPositions: metrics.openPositions,
       maxOpenPositions: config.maxPositions,
@@ -394,7 +390,7 @@ async function processSymbol(symbol: string): Promise<void> {
       cognitive,
       scorecard,
       sentiment,
-      aiNarrative: narrative?.text ?? null,
+      aiNarrative: narrative?.narrative ?? null,
       aiSource: narrative?.source ?? null,
       drawdown: metrics.drawdown,
       dailyPnl: metrics.dailyPnl,
