@@ -72,7 +72,6 @@ import {
   getOperatorControlState,
 } from './operator-control.js';
 import { recordTrustObservation } from '../trust/reputation-evolution.js';
-import { probeGeminiCookieClient } from '../data/gemini-cookie-client.js';
 import type { ClosedTrade } from './trade-log.js';
 
 const log = createLogger('AGENT');
@@ -111,11 +110,6 @@ async function bootstrap(): Promise<void> {
   }
 
   _identity = await loadIdentity();
-
-  // Probe Gemini cookie session so any auth issue is visible at startup
-  if (config.geminiPsid && config.geminiPsidts) {
-    probeGeminiCookieClient(config.geminiPsid, config.geminiPsidts).catch(() => {});
-  }
 
   startDashboard();
   startMCPServer();
