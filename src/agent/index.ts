@@ -93,6 +93,14 @@ let _mandateViolations = 0;
 let _ipfsPinnedCount = 0;
 let _prevTrustScore: number | null = null;
 
+// Session-level heartbeat / observability state
+const _startedAt = Date.now();
+let _lastCycleAt: string | null = null;
+let _lastTradeAt: string | null = null;
+let _consecutiveErrors = 0;
+let _lastNarrative: { narrative: string; source: string; symbol: string; timestamp: string } | null = null;
+let _lastSentiment: Record<string, unknown> | null = null;
+
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 async function bootstrap(): Promise<void> {
@@ -140,6 +148,8 @@ async function runCycle(): Promise<void> {
   }
 
   incrementCycle();
+  _lastCycleAt = new Date().toISOString();
+  _consecutiveErrors = 0;
 
   // Run adaptive learning reflection (throttled internally)
   const adaptations = runAdaptation(state.cycle);
@@ -224,6 +234,7 @@ async function processSymbol(symbol: string): Promise<void> {
       fetchPrismData(symbol).catch(() => null),
     ]);
 
+    if (sentiment) _lastSentiment = sentiment as Record<string, unknown>;
     if (sentiment && Math.abs(sentiment.composite) > 0.6) {
       const boost = sentiment.composite > 0 ? 0.05 : -0.05;
       signal = { ...signal, confidence: Math.min(0.95, signal.confidence + boost) };
@@ -371,6 +382,9 @@ async function processSymbol(symbol: string): Promise<void> {
       signal,
       `Symbol: ${symbol} | Trust: ${scorecard.tier} | Tier: ${supervisory.trustTier} | Cycle: ${getState().cycle}`,
     ).catch(() => null);
+    if (narrative) {
+      _lastNarrative = { narrative: narrative.narrative, source: narrative.source, symbol, timestamp: new Date().toISOString() };
+    }
 
     // 14. Apply supervisory sizing on top of risk manager sizing
     const riskSizedUnits = riskDecision.positionSize * scorecard.sizeFactor;
@@ -452,6 +466,7 @@ async function processSymbol(symbol: string): Promise<void> {
     log.info(`[AGENT] Trade opened: ${symbol} ${signal.direction.toUpperCase()} size=${finalSize.toFixed(6)} @ ${signal.price.toFixed(4)} | tier=${supervisory.trustTier} | CP#${cp.id}`);
 
   } catch (e) {
+    _consecutiveErrors++;
     log.error(`[AGENT] processSymbol(${symbol}) error: ${e}`);
   }
 }
@@ -485,6 +500,7 @@ async function checkManagedPositions(): Promise<void> {
       const won = closed.pnl > 0;
       recordTrade(pos.symbol, won);
       if (reason === 'stop_loss') _stopHitCount++;
+      _lastTradeAt = new Date().toISOString();
 
       // Record outcome for adaptive learning
       recordTradeOutcome({
@@ -628,6 +644,14 @@ function broadcastState(): void {
       totalSignals: _totalSignals,
       ipfsPinnedCount: _ipfsPinnedCount,
     },
+    heartbeat: {
+      lastCycleAt: _lastCycleAt,
+      lastTradeAt: _lastTradeAt,
+      uptimeMs: Date.now() - _startedAt,
+      consecutiveErrors: _consecutiveErrors,
+    },
+    narrative: _lastNarrative,
+    sentiment: _lastSentiment,
   };
 
   injectDashboard(shared);

@@ -13,6 +13,10 @@ import { getCheckpoints, getCheckpointStats, verifyChain } from '../trust/checkp
 import { getRecentLogs } from '../agent/logger.js';
 import { getSAGEStatus } from '../strategy/sage-engine.js';
 import { getClosedTrades, getTradeStats } from '../agent/trade-log.js';
+import {
+  pauseTrading, resumeTrading, emergencyStop,
+  getOperatorControlState, getOperatorActionReceipts,
+} from '../agent/operator-control.js';
 
 const log = createLogger('DASHBOARD');
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -102,6 +106,35 @@ export function startDashboard(): void {
     const result = verifyChain();
     const stats = getCheckpointStats();
     res.json({ ...result, ...stats });
+  });
+
+  // ── Operator control endpoints ───────────────────────────────────────────────
+
+  app.get('/api/operator/state', (_, res) => {
+    res.json(getOperatorControlState());
+  });
+
+  app.get('/api/operator/actions', (req, res) => {
+    const limit = parseInt((req.query.limit as string) ?? '20');
+    res.json({ actions: getOperatorActionReceipts(limit) });
+  });
+
+  app.post('/api/operator/pause', (req, res) => {
+    const { reason = 'manual_pause', actor = 'dashboard' } = req.body ?? {};
+    pauseTrading(String(reason), String(actor));
+    res.json({ state: getOperatorControlState() });
+  });
+
+  app.post('/api/operator/resume', (req, res) => {
+    const { reason = 'manual_resume', actor = 'dashboard' } = req.body ?? {};
+    resumeTrading(String(reason), String(actor));
+    res.json({ state: getOperatorControlState() });
+  });
+
+  app.post('/api/operator/emergency-stop', (req, res) => {
+    const { reason = 'emergency', actor = 'dashboard' } = req.body ?? {};
+    emergencyStop(String(reason), String(actor));
+    res.json({ state: getOperatorControlState() });
   });
 
   app.listen(config.dashboardPort, () => {
