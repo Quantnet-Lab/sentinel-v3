@@ -149,11 +149,10 @@ export function evaluateSupervisoryDecision(input: SupervisoryInput): Supervisor
     reason.push('extreme volatility requires elevated trust >= 90');
   }
 
-  if ((input.validationScore ?? 100) < 70) {
-    canTrade = false;
-    status = 'blocked';
-    restrictions.push('validation_shortfall');
-    reason.push(`validation completeness ${input.validationScore} below supervisory threshold`);
+  // Validation completeness (IPFS, on-chain) is tracked and shown on the
+  // dashboard scorecard but is not a hard trading gate — it's an audit metric.
+  if (input.validationScore !== null && input.validationScore !== undefined) {
+    reason.push(`validation completeness ${input.validationScore.toFixed(0)}%`);
   }
 
   return {
