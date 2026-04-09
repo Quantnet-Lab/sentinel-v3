@@ -77,6 +77,7 @@ export class RiskManager {
   private dailyPnl = 0;
   private dailyReset = new Date().toDateString();
   private positions = new Map<number, Position>();
+  private lastPrices = new Map<string, number>();
   private circuitBreaker = new CircuitBreaker();
   private volatility: VolatilityTracker;
 
@@ -212,8 +213,13 @@ export class RiskManager {
     return { position: pos, pnl, pnlPct };
   }
 
+  markPrice(symbol: string, price: number): void {
+    this.lastPrices.set(symbol, price);
+  }
+
   updateTrailingStop(id: number, currentPrice: number): Position | null {
     const pos = this.positions.get(id);
+    if (pos) this.lastPrices.set(pos.symbol, currentPrice);
     if (!pos || pos.trailingStopDistance == null) return null;
 
     if (pos.side === 'buy' && currentPrice > pos.highWaterMark) {
@@ -251,14 +257,27 @@ export class RiskManager {
   }
 
   getMetrics(): RiskMetrics {
-    const drawdown = (this.peakEquity - this.equity) / this.peakEquity;
-    const exposure = Array.from(this.positions.values()).reduce((s, p) => s + p.size * p.entryPrice, 0);
-    const cb = this.circuitBreaker.getState();
+    // Mark-to-market: add unrealized P&L from open positions
+    let unrealizedPnl = 0;
+    let exposure = 0;
+    for (const pos of this.positions.values()) {
+      const mktPrice = this.lastPrices.get(pos.symbol) ?? pos.entryPrice;
+      exposure += pos.size * mktPrice;
+      const rawPnl = pos.side === 'buy'
+        ? (mktPrice - pos.entryPrice) * pos.size
+        : (pos.entryPrice - mktPrice) * pos.size;
+      unrealizedPnl += rawPnl;
+    }
+
+    const mtmEquity = this.equity + unrealizedPnl;
+    const drawdown  = (this.peakEquity - mtmEquity) / this.peakEquity;
+    const cb        = this.circuitBreaker.getState();
+
     return {
-      equity: this.equity,
+      equity: mtmEquity,
       peakEquity: this.peakEquity,
-      drawdown,
-      dailyPnl: this.dailyPnl,
+      drawdown: Math.max(0, drawdown),
+      dailyPnl: this.dailyPnl + unrealizedPnl,
       openPositions: this.positions.size,
       totalExposure: exposure,
       status: cb.tripped ? 'halted' : drawdown > config.maxDrawdownPct * 0.7 ? 'caution' : 'normal',

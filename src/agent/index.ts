@@ -163,6 +163,7 @@ async function processSymbol(symbol: string): Promise<void> {
       fetchTicker([symbol]),
     ]);
     const ticker = tickerMap[symbol] ?? null;
+    if (ticker?.price) risk.markPrice(symbol, ticker.price);
 
     if (candles.length < 50) {
       log.warn(`[AGENT] Insufficient candles for ${symbol}: ${candles.length}`);
@@ -466,6 +467,7 @@ async function checkManagedPositions(): Promise<void> {
       const price = tickerMap[pos.symbol]?.price;
       if (!price) continue;
 
+      risk.markPrice(pos.symbol, price);
       risk.updateTrailingStop(pos.id, price);
 
       const { close, reason } = risk.shouldClose(pos, price);
