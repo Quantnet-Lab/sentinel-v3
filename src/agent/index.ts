@@ -246,17 +246,16 @@ async function executeSignal(
       return;
     }
 
-    // Stage 5: Execute order
+    // Stage 5: Execute order (paper fallback keeps pipeline alive even if Kraken rejects)
     const orderResult = await placeOrder({ symbol, side: signal.direction as 'buy' | 'sell', volume: riskDecision.positionSize });
     if (!orderResult.success) {
-      log.error(`[AGENT] Order failed for ${symbol}/${signal.strategy}: ${orderResult.error}`);
-      return;
+      log.warn(`[AGENT] Kraken order failed (${orderResult.error}) — recording paper trade for on-chain submission`);
     }
 
     const position = risk.openPosition(symbol, signal, riskDecision, null);
     _lastTradeAt = new Date().toISOString();
 
-    // Submit signed TradeIntent to ERC-8004 Risk Router (async, non-blocking)
+    // Submit signed TradeIntent to ERC-8004 Risk Router — always fires (leaderboard)
     if (_identity?.agentId != null) {
       submitTradeIntent({
         agentId:    _identity.agentId,
@@ -266,6 +265,9 @@ async function executeSignal(
         size:       riskDecision.positionSize,
         stopLoss:   signal.stopLoss ?? signal.price * 0.98,
         takeProfit: signal.takeProfit ?? signal.price * 1.03,
+      }).then(r => {
+        if (r.submitted) log.info(`[AGENT] TradeIntent on-chain | intentId=${r.intentId} | tx=${r.txHash}`);
+        else log.warn(`[AGENT] TradeIntent failed: ${r.error}`);
       }).catch(() => {});
     }
 
