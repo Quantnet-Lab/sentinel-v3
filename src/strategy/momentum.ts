@@ -1,77 +1,93 @@
 /**
- * Momentum Strategy — MACD crossover + EMA trend + RSI filter.
- * Fires in trending regimes as the ensemble fallback.
+ * Momentum Strategy — SMA crossover + trend continuation scoring.
+ *
+ * Fires continuously whenever:
+ *   1. SMA(20) crosses SMA(50) — crossover signal
+ *   2. SMA separation > 0.3% — trend continuation (no crossover needed)
+ *   3. Short momentum (5-bar return) aligns with trend direction
+ *
+ * No kill zones. No session restrictions. 24/7 crypto compatible.
  */
 
 import type { Candle, TradeSignal, MarketRegime } from './types.js';
-import { closes, ema, macd, rsiLast, atrLast } from '../strategy/indicators.js';
-import { HOLD_SIGNAL as makeHold } from './types.js';
+import { closes, ema, rsiLast, atrLast } from './indicators.js';
+import { HOLD_SIGNAL } from './types.js';
 
 export class MomentumStrategy {
   generate(candles: Candle[], regime: MarketRegime): TradeSignal {
-    if (candles.length < 60) return makeHold(candles.at(-1)?.close ?? 0, regime, 'Not enough data', 'momentum');
+    if (candles.length < 60) return HOLD_SIGNAL(candles.at(-1)?.close ?? 0, regime, 'Not enough data', 'momentum');
 
-    const c = closes(candles);
-    const { macd: macdLine, signal: signalLine } = macd(c, 12, 26, 9);
-    const ema50 = ema(c, 50);
-    const rsiVal = rsiLast(c, 14);
-    const atrVal = atrLast(candles, 14);
+    const c     = closes(candles);
     const price = c[c.length - 1];
+    const atr   = atrLast(candles, 14);
+    const rsi   = rsiLast(c, 14);
 
-    const macdCurr = macdLine[macdLine.length - 1];
-    const macdPrev = macdLine[macdLine.length - 2];
-    const sigCurr  = signalLine[signalLine.length - 1];
-    const sigPrev  = signalLine[signalLine.length - 2];
-    const e50 = ema50[ema50.length - 1];
+    // SMA via EMA (same values at period boundaries, faster)
+    const sma20 = ema(c, 20);
+    const sma50 = ema(c, 50);
 
-    const bullCross = macdPrev < sigPrev && macdCurr > sigCurr;
-    const bearCross = macdPrev > sigPrev && macdCurr < sigCurr;
-    const aboveEma  = price > e50;
-    const belowEma  = price < e50;
+    const s20      = sma20[sma20.length - 1];
+    const s20prev  = sma20[sma20.length - 2];
+    const s50      = sma50[sma50.length - 1];
+    const s50prev  = sma50[sma50.length - 2];
 
-    if ((regime === 'trending_up' || regime === 'ranging') && bullCross && aboveEma && rsiVal < 70) {
-      const confidence = this.confidence(rsiVal, macdCurr - sigCurr, atrVal, 'buy');
+    // SMA separation as % of price
+    const separation = (s20 - s50) / price;
+
+    // 5-bar short momentum
+    const momentum5 = (price - c[c.length - 6]) / c[c.length - 6];
+
+    // Crossover detection
+    const bullCross = s20prev < s50prev && s20 > s50;
+    const bearCross = s20prev > s50prev && s20 < s50;
+
+    // Trend continuation (SMA already separated, momentum confirms)
+    const bullTrend = separation > 0.003 && momentum5 > 0;
+    const bearTrend = separation < -0.003 && momentum5 < 0;
+
+    const isBull = bullCross || bullTrend;
+    const isBear = bearCross || bearTrend;
+
+    if (!isBull && !isBear) {
+      return HOLD_SIGNAL(price, regime, `No trend. Sep=${(separation*100).toFixed(2)}%, Mom5=${(momentum5*100).toFixed(2)}%`, 'momentum');
+    }
+
+    // Score: base + separation strength + momentum alignment + RSI filter
+    const sepStrength = Math.min(Math.abs(separation) / 0.01, 1.0); // caps at 1% sep
+    const momStrength = Math.min(Math.abs(momentum5) / 0.005, 1.0);
+
+    if (isBull && rsi < 75) {
+      const crossBonus = bullCross ? 0.1 : 0;
+      const confidence = Math.min(0.85, 0.45 + sepStrength * 0.2 + momStrength * 0.15 + crossBonus);
       return {
         direction: 'buy',
         confidence,
         strategy: 'momentum',
         price,
-        stopLoss:   price - atrVal * 2,
-        takeProfit: price + atrVal * 3,
-        reasoning:  `[MOMENTUM BUY] MACD crossover above EMA50. MACD=${macdCurr.toFixed(4)}, RSI=${rsiVal.toFixed(1)}`,
+        stopLoss:   price - atr * 2,
+        takeProfit: price + atr * 3,
+        reasoning:  `[MOMENTUM BUY] ${bullCross ? 'SMA crossover' : 'Trend continuation'} sep=${(separation*100).toFixed(2)}% mom5=${(momentum5*100).toFixed(2)}% RSI=${rsi.toFixed(1)}`,
         regime,
         timestamp: new Date().toISOString(),
       };
     }
 
-    if ((regime === 'trending_down' || regime === 'ranging') && bearCross && belowEma && rsiVal > 30) {
-      const confidence = this.confidence(rsiVal, sigCurr - macdCurr, atrVal, 'sell');
+    if (isBear && rsi > 25) {
+      const crossBonus = bearCross ? 0.1 : 0;
+      const confidence = Math.min(0.85, 0.45 + sepStrength * 0.2 + momStrength * 0.15 + crossBonus);
       return {
         direction: 'sell',
         confidence,
         strategy: 'momentum',
         price,
-        stopLoss:   price + atrVal * 2,
-        takeProfit: price - atrVal * 3,
-        reasoning:  `[MOMENTUM SELL] MACD crossover below EMA50. MACD=${macdCurr.toFixed(4)}, RSI=${rsiVal.toFixed(1)}`,
+        stopLoss:   price + atr * 2,
+        takeProfit: price - atr * 3,
+        reasoning:  `[MOMENTUM SELL] ${bearCross ? 'SMA crossover' : 'Trend continuation'} sep=${(separation*100).toFixed(2)}% mom5=${(momentum5*100).toFixed(2)}% RSI=${rsi.toFixed(1)}`,
         regime,
         timestamp: new Date().toISOString(),
       };
     }
 
-    return makeHold(price, regime, `No MACD crossover or trend misalignment. MACD=${macdCurr?.toFixed(4)}, RSI=${rsiVal.toFixed(1)}`, 'momentum');
-  }
-
-  private confidence(rsi: number, macdStrength: number, atr: number, dir: 'buy' | 'sell'): number {
-    let score = 0.5;
-    if (dir === 'buy') {
-      if (rsi < 60) score += 0.1;
-      if (rsi > 50) score += 0.05;
-    } else {
-      if (rsi > 40) score += 0.1;
-      if (rsi < 50) score += 0.05;
-    }
-    if (macdStrength > atr * 0.01) score += 0.1;
-    return Math.max(0, Math.min(1, score));
+    return HOLD_SIGNAL(price, regime, `RSI filter blocked. RSI=${rsi.toFixed(1)}`, 'momentum');
   }
 }

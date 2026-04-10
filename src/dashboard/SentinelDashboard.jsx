@@ -2,15 +2,12 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 
 /* ═══════════════════════════════════════════════════════════════════════
    SENTINEL v3 — Institutional SMC Trading Agent
-   ERC-8004 Trust-Governed · 18-Stage Governance Pipeline
+   ERC-8004 Trust-Governed · 6-Stage Governance Pipeline
    Live Proof Dashboard · Production Control Plane
    ═══════════════════════════════════════════════════════════════════════ */
 
 const PIPELINE_STAGES = [
-  "Oracle Guard","Ensemble","Neuro-Sym","Sentiment","PRISM",
-  "Adapt Bias","Op Control","Mandate","Sim","Supervisory",
-  "Scorecard","Risk","Narrative","Execute","Artifact",
-  "Checkpoint","IPFS","On-Chain",
+  "Oracle","Signal","Sentiment","Risk Gate","Execute","Record",
 ];
 
 const clamp = (v,lo,hi) => Math.max(lo,Math.min(hi,v));
@@ -268,13 +265,13 @@ function Sentinel() {
   const { stagesDone, hasActiveStage } = useMemo(() => {
     if (!cpList.length) return { stagesDone: 0, hasActiveStage: false };
     const last = cpList[0];
-    if (last.eventType === "trade")     return { stagesDone: 18, hasActiveStage: false };
-    if (last.eventType === "close")     return { stagesDone: 15, hasActiveStage: false };
-    if (last.eventType === "heartbeat") return { stagesDone: 8,  hasActiveStage: true  };
-    if (last.eventType === "veto")      return { stagesDone: 10, hasActiveStage: true  };
-    if (last.eventType === "halt")      return { stagesDone: 12, hasActiveStage: true  };
-    // "signal" = HOLD — completed Oracle+Ensemble+Neuro-Sym, stopped there
-    return { stagesDone: 3, hasActiveStage: false };
+    if (last.eventType === "trade")     return { stagesDone: 6, hasActiveStage: false };
+    if (last.eventType === "close")     return { stagesDone: 6, hasActiveStage: false };
+    if (last.eventType === "heartbeat") return { stagesDone: 2, hasActiveStage: true  };
+    if (last.eventType === "veto")      return { stagesDone: 4, hasActiveStage: true  };
+    if (last.eventType === "halt")      return { stagesDone: 4, hasActiveStage: true  };
+    // "signal" = HOLD — completed Oracle+Signal, stopped there
+    return { stagesDone: 2, hasActiveStage: false };
   }, [cpList]);
 
   const lastCycleMs = hb.lastCycleAt ? Date.now() - new Date(hb.lastCycleAt).getTime() : null;
@@ -513,9 +510,9 @@ function Sentinel() {
         </div>
 
         {/* ── Row 2: Governance Pipeline (full width) ── */}
-        <Panel title="Governance Pipeline" tag="18-stage ERC-8004" tip="Every trade passes through 18 deterministic stages." full style={{ marginBottom:10 }}>
+        <Panel title="Governance Pipeline" tag="6-stage ERC-8004" tip="Every trade passes through 6 deterministic stages." full style={{ marginBottom:10 }}>
           <div style={{ fontSize:9.5, color:T.fg2, marginBottom:8 }}>
-            Every signal traverses 18 gate stages — only trades that clear all checks execute on-chain.
+            Every signal traverses 6 gate stages — only trades that clear all checks execute on-chain.
           </div>
           <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
             {PIPELINE_STAGES.map((s,i) => {
@@ -542,7 +539,7 @@ function Sentinel() {
           <div style={{ marginTop:8, display:"flex", gap:16, fontSize:10, color:T.fg2 }}>
             <span><span style={{ color:T.up }}>■</span> Passed ({stagesDone})</span>
             {hasActiveStage && <span><span style={{ color:T.warn }}>■</span> Active</span>}
-            <span><span style={{ color:T.fg3 }}>■</span> {cpList[0]?.eventType === "signal" ? "Skipped — HOLD signal" : `Pending (${18-stagesDone})`}</span>
+            <span><span style={{ color:T.fg3 }}>■</span> {cpList[0]?.eventType === "signal" ? "Skipped — HOLD signal" : `Pending (${6-stagesDone})`}</span>
           </div>
         </Panel>
 
@@ -672,7 +669,7 @@ function Sentinel() {
           </Panel>
 
           {/* Governance Counters + SAGE */}
-          <Panel title="Governance" tag="18-stage">
+          <Panel title="Governance" tag="6-stage">
             <KV k="Total Signals"    v={gov.totalSignals     ?? 0} />
             <KV k="Vetoed"           v={gov.vetoedTrades     ?? 0} c={(gov.vetoedTrades??0)>0?T.warn:T.fg} />
             <KV k="Mandate Violations" v={gov.mandateViolations ?? 0} c={(gov.mandateViolations??0)>0?T.dn:T.fg} />

@@ -14,8 +14,8 @@ const log = createLogger('IDENTITY');
 const ID_FILE = join(process.cwd(), 'agent-id.json');
 
 const AGENT_REGISTRY_ABI = [
-  'function getAgent(uint256 agentId) view returns (address wallet, string name, bool active, uint256 registeredAt)',
-  'function agentCount() view returns (uint256)',
+  'function getAgent(uint256 agentId) external view returns (tuple(address operatorWallet, address agentWallet, string name, string description, string[] capabilities, uint256 registeredAt, bool active))',
+  'function isRegistered(uint256 agentId) external view returns (bool)',
 ];
 
 export interface AgentIdentity {
@@ -79,21 +79,25 @@ export async function loadIdentity(): Promise<AgentIdentity> {
     const data = await Promise.race([
       registry.getAgent(agentId),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000)),
-    ]) as [string, string, boolean, bigint];
+    ]) as any;
 
-    const registeredAt = Number(data[3]);
-    const ageDays = registeredAt > 0 ? (Date.now() / 1000 - registeredAt) / 86400 : null;
+    // data is a tuple: (operatorWallet, agentWallet, name, description, capabilities, registeredAt, active)
+    const registeredAt = Number(data.registeredAt ?? data[5] ?? 0);
+    const active       = Boolean(data.active ?? data[6] ?? false);
+    const agentWallet  = String(data.agentWallet ?? data[1] ?? '');
+    const name         = String(data.name ?? data[2] ?? '');
+    const ageDays      = registeredAt > 0 ? (Date.now() / 1000 - registeredAt) / 86400 : null;
 
     cachedIdentity = {
       ...base,
-      agentWallet: data[0] || base.agentWallet,
-      name: data[1] || base.name,
-      active: data[2],
+      agentWallet: agentWallet || base.agentWallet,
+      name: name || base.name,
+      active,
       registeredAt,
       identityAgeDays: ageDays,
       chain: 'live',
     };
-    log.info(`[IDENTITY] ERC-8004 ready | agentId=${agentId} | active=${data[2]} | age=${ageDays?.toFixed(1)}d`);
+    log.info(`[IDENTITY] ERC-8004 ready | agentId=${agentId} | active=${active} | age=${ageDays?.toFixed(1)}d`);
   } catch (e) {
     log.warn(`[IDENTITY] Chain unavailable (${e}) — offline mode`);
     cachedIdentity = base;
