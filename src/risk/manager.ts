@@ -246,6 +246,9 @@ export class RiskManager {
       if (pos.side === 'buy'  && currentPrice >= pos.takeProfit) return { close: true, reason: 'take_profit' };
       if (pos.side === 'sell' && currentPrice <= pos.takeProfit) return { close: true, reason: 'take_profit' };
     }
+    // Auto-close after 2 hours so paper positions don't fill the limit forever
+    const ageMs = Date.now() - new Date(pos.openedAt).getTime();
+    if (ageMs > 2 * 60 * 60 * 1000) return { close: true, reason: 'max_hold_time' };
     return { close: false, reason: '' };
   }
 
