@@ -27,8 +27,8 @@ const log = createLogger('ROUTER');
 // ── ABIs ─────────────────────────────────────────────────────────────────────
 
 const RISK_ROUTER_ABI = [
-  // Submit a signed trade intent — returns an intentId
-  'function submitIntent(uint256 agentId, string symbol, string direction, uint256 priceE8, uint256 sizeE8, uint256 stopLossE8, uint256 takeProfitE8, uint256 nonce, uint256 timestamp, bytes signature) external returns (bytes32)',
+  // Submit a signed trade intent — new struct format
+  'function submitIntent(uint256 agentId, address agentWallet, string pair, string action, uint256 amountUsdScaled, uint256 maxSlippageBps, uint256 nonce, uint256 deadline, bytes signature) external returns (bytes32)',
   // Close an open position
   'function closePosition(bytes32 intentId, uint256 exitPriceE8) external',
   // Query open position
@@ -36,7 +36,7 @@ const RISK_ROUTER_ABI = [
   // Agent sandbox balance from vault
   'function getAgentBalance(uint256 agentId) external view returns (uint256)',
   // Events
-  'event IntentSubmitted(uint256 indexed agentId, bytes32 indexed intentId, string symbol, string direction, uint256 priceE8, uint256 sizeE8)',
+  'event IntentSubmitted(uint256 indexed agentId, bytes32 indexed intentId, string pair, string action, uint256 amountUsdScaled)',
   'event PositionClosed(uint256 indexed agentId, bytes32 indexed intentId, uint256 exitPriceE8, int256 pnl)',
 ];
 
@@ -192,18 +192,22 @@ export async function submitTradeIntent(params: {
   }
 
   const nonce = nextNonce();
+  const deadline = Math.floor(Date.now() / 1000) + 300; // 5 min window
+  // amountUsdScaled: notional value in USD scaled by 1e6
+  const amountUsdScaled = Math.round(params.price * params.size * 1e6);
+  const maxSlippageBps = 100; // 1% slippage tolerance
 
   try {
-    // Sign the TradeIntent with EIP-712
+    // Sign the TradeIntent with EIP-712 (RiskRouter domain)
     const signature = await signTradeIntent({
-      agentId:    params.agentId,
-      symbol:     params.symbol,
-      direction:  params.direction,
-      price:      params.price,
-      size:       params.size,
-      stopLoss:   params.stopLoss,
-      takeProfit: params.takeProfit,
+      agentId:         params.agentId,
+      agentWallet:     wallet.address,
+      pair:            params.symbol,
+      action:          params.direction,
+      amountUsdScaled,
+      maxSlippageBps,
       nonce,
+      deadline,
     });
 
     if (!signature) {
@@ -212,21 +216,17 @@ export async function submitTradeIntent(params: {
 
     const router = new ethers.Contract(config.riskRouterAddress, RISK_ROUTER_ABI, wallet);
 
-    // Convert to e8 fixed-point (multiply by 1e8)
-    const toE8 = (n: number) => BigInt(Math.round(n * 1e8));
-
-    log.info(`[ROUTER] Submitting TradeIntent: ${params.direction.toUpperCase()} ${params.size.toFixed(6)} ${params.symbol} @ ${params.price.toFixed(4)}`);
+    log.info(`[ROUTER] Submitting TradeIntent: ${params.direction.toUpperCase()} ${params.symbol} ~$${(amountUsdScaled / 1e6).toFixed(2)}`);
 
     const tx = await router.submitIntent(
       params.agentId,
+      wallet.address,
       params.symbol,
       params.direction,
-      toE8(params.price),
-      toE8(params.size),
-      toE8(params.stopLoss),
-      toE8(params.takeProfit),
-      nonce,
-      Math.floor(Date.now() / 1000),
+      BigInt(amountUsdScaled),
+      BigInt(maxSlippageBps),
+      BigInt(nonce),
+      BigInt(deadline),
       signature,
     );
 
