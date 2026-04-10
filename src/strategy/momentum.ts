@@ -41,9 +41,9 @@ export class MomentumStrategy {
     const bullCross = s20prev < s50prev && s20 > s50;
     const bearCross = s20prev > s50prev && s20 < s50;
 
-    // Trend continuation (SMA already separated, momentum confirms)
-    const bullTrend = separation > 0.003 && momentum5 > 0;
-    const bearTrend = separation < -0.003 && momentum5 < 0;
+    // Trend continuation — lowered to 0.05% so it fires in ranging markets too
+    const bullTrend = separation > 0.0005 && momentum5 > 0;
+    const bearTrend = separation < -0.0005 && momentum5 < 0;
 
     const isBull = bullCross || bullTrend;
     const isBear = bearCross || bearTrend;
@@ -53,8 +53,8 @@ export class MomentumStrategy {
     }
 
     // Score: base + separation strength + momentum alignment + RSI filter
-    const sepStrength = Math.min(Math.abs(separation) / 0.01, 1.0); // caps at 1% sep
-    const momStrength = Math.min(Math.abs(momentum5) / 0.005, 1.0);
+    const sepStrength = Math.min(Math.abs(separation) / 0.003, 1.0); // caps at 0.3% sep
+    const momStrength = Math.min(Math.abs(momentum5) / 0.001, 1.0);  // caps at 0.1% mom
 
     if (isBull && rsi < 75) {
       const crossBonus = bullCross ? 0.1 : 0;

@@ -39,8 +39,8 @@ export class EngulfingStrategy {
     const blocks = orderBlocks(candles.slice(0, -3), 10);
     const shighs = swingHighs(candles, 5);
     const slows  = swingLows(candles, 5);
-    const nearestSwingHigh = candles.filter((_, i) => shighs[i]).map(c => c.high).filter(h => Math.abs(h - price) / price < 0.005);
-    const nearestSwingLow  = candles.filter((_, i) => slows[i]).map(c => c.low).filter(l => Math.abs(l - price) / price < 0.005);
+    const nearestSwingHigh = candles.filter((_, i) => shighs[i]).map(c => c.high).filter(h => Math.abs(h - price) / price < 0.015);
+    const nearestSwingLow  = candles.filter((_, i) => slows[i]).map(c => c.low).filter(l => Math.abs(l - price) / price < 0.015);
 
     const nearBullOB = blocks.some(ob => ob.type === 'bullish' && price >= ob.bottom * 0.998 && price <= ob.top * 1.002);
     const nearBearOB = blocks.some(ob => ob.type === 'bearish' && price >= ob.bottom * 0.998 && price <= ob.top * 1.002);
