@@ -1,6 +1,6 @@
 # Sentinel v3 — ERC-8004 Autonomous Trading Agent
 
-Sentinel is a fully autonomous on-chain trading agent built for the ERC-8004 hackathon. It runs a 6-stage governance pipeline, signs TradeIntents with EIP-712, submits them to the Sepolia Risk Router, and records every decision to IPFS as a tamper-proof audit trail.
+Sentinel is a fully autonomous on-chain trading agent built for the ERC-8004 standard. It runs a 6-stage governance pipeline per symbol, signs TradeIntents with EIP-712, submits them to the Sepolia Risk Router, and records every decision to IPFS as a tamper-proof audit trail. The agent learns from its own trade history via a bounded adaptive engine (CAGE).
 
 ---
 
@@ -29,34 +29,34 @@ npm run dev
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Sentinel v3 Agent                     │
-│                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
-│  │ Oracle   │→ │ Signal   │→ │Sentiment │              │
-│  │(Kraken)  │  │(3 strats)│  │(Fear/Fund│              │
-│  └──────────┘  └──────────┘  └──────────┘              │
-│                                    │                     │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
-│  │ Record   │← │ Execute  │← │Risk Gate │              │
-│  │(IPFS/CP) │  │(Kraken)  │  │(Manager) │              │
-│  └──────────┘  └──────────┘  └──────────┘              │
-│                                    │                     │
-│              ERC-8004 Risk Router (Sepolia)              │
-│              EIP-712 TradeIntent Submission              │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                      Sentinel v3 Agent                       │
+│                                                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐  │
+│  │ Oracle   │→ │ Signal   │→ │Sentiment │→ │ Risk Gate  │  │
+│  │(Kraken)  │  │(3 strats)│  │(F&G/Fund)│  │(Manager)   │  │
+│  └──────────┘  └──────────┘  └──────────┘  └────────────┘  │
+│                                                    │         │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐  │
+│  │ SAGE     │  │ Adaptive │  │ Record   │← │ Execute    │  │
+│  │ Engine   │  │ Learning │  │(IPFS/CP) │  │(Kraken)    │  │
+│  └──────────┘  └──────────┘  └──────────┘  └────────────┘  │
+│                                                              │
+│            ERC-8004 Risk Router (Sepolia)                    │
+│            EIP-712 TradeIntent Submission                    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### 6-Stage Pipeline
+### 6-Stage Pipeline (per symbol, every cycle)
 
 | Stage | Name | What it does |
 |-------|------|--------------|
-| 1 | **Oracle** | Fetches live 1-min candles from Kraken REST API |
-| 2 | **Signal** | Runs 3 strategies (order_block, engulfing, momentum) |
-| 3 | **Sentiment** | Checks Fear & Greed + funding rate proxy |
-| 4 | **Risk Gate** | Position limits, drawdown, daily loss, circuit breaker |
+| 1 | **Oracle** | Fetches live 1-min candles from Kraken REST + data integrity check |
+| 2 | **Signal** | Runs 3 strategies (order_block, engulfing, momentum) via ensemble |
+| 3 | **Sentiment** | Fear & Greed + funding rate proxy adjusts confidence |
+| 4 | **Risk Gate** | Mandate check, position limits, drawdown, daily loss, circuit breaker, execution simulation |
 | 5 | **Execute** | Places paper/live order on Kraken; submits EIP-712 TradeIntent on-chain |
-| 6 | **Record** | Saves checkpoint to IPFS, logs to dashboard |
+| 6 | **Record** | Saves tamper-evident checkpoint to IPFS, logs to dashboard |
 
 ---
 
@@ -64,20 +64,33 @@ npm run dev
 
 See [TRADING.md](TRADING.md) for full details.
 
-| Strategy | Signal | Min Confidence |
-|----------|--------|----------------|
-| Order Block | Price retests institutional OB zone + BOS confirmation | 60% |
-| Engulfing | Engulfing candle at swing high/low or OB level | 55% |
-| Momentum | SMA(20/50) crossover or 0.05% separation with momentum | 45% |
+| Strategy | Signal | Confidence Range |
+|----------|--------|-----------------|
+| Order Block | Price retests institutional OB zone, optional BOS/FVG/sweep bonuses | 52–92% |
+| Engulfing | Engulfing candle at swing high/low with ATR body filter | 55–82% |
+| Momentum | EMA(20/50) crossover + MACD confirmation, regime-aware | 45–85% |
+
+### Ensemble
+All 3 run every cycle per symbol. Confluence bonus applied when 2+ strategies agree direction (+5%) or all 3 agree (+8%). Highest-confidence signal above `MIN_CONFIDENCE` wins.
+
+### Adaptive Learning (CAGE)
+After every 10 trades, the agent adjusts 3 parameters within hard bounds:
+- **SL ATR multiple** — widens if stop-hit rate > 60%, tightens if < 20% (bounds: 1.0–2.5)
+- **Position size %** — shrinks on win rate < 35%, grows on > 55% (bounds: 1–4% equity)
+- **Confidence threshold** — raises if false signal rate > 50% (bounds: 5–30%)
+
+### SAGE Engine
+Self-Adapting Generative Engine: runs a Groq/Gemini reflection after each trade, produces adaptive playbook rules that adjust ensemble weights.
 
 ---
 
 ## On-Chain Setup (ERC-8004)
 
 ### Deployed Agent
-- **agentId:** `57`
+- **agentId:** `19`
 - **Wallet:** `0x51E8bf572a357f501aB3393f13183b9f7a6B0775`
 - **Network:** Sepolia testnet
+- **Age:** ~5 days active
 
 ### Contracts
 
@@ -115,15 +128,20 @@ AGENT_REGISTRY_ADDRESS=0x97b07dDc405B0c28B17559aFFE63BdB3632d0ca3
 HACKATHON_VAULT_ADDRESS=0x0E7CD8ef9743FEcf94f9103033a044caBD45fC90
 RISK_ROUTER_ADDRESS=0xd6A6952545FF6E6E6681c2d15C59f9EB8F40FdBC
 REPUTATION_REGISTRY_ADDRESS=0x423a9904e39537a9997fbaF0f220d79D7d545763
-AGENT_ID=57                              # Set after running npm run register
+AGENT_ID=19                              # Set after running npm run register
 
 # Kraken API (optional — paper mode works without it)
 KRAKEN_API_KEY=...
 KRAKEN_API_SECRET=...
 
+# AI / Reasoning
+GROQ_API_KEY=...                         # Groq API key (narrative + SAGE fallback)
+ANTHROPIC_API_KEY=...                    # Optional — primary AI reasoning chain
+
 # Execution
 EXECUTION_MODE=paper                     # paper | live | disabled
-TRADING_SYMBOLS=BTCUSD,ETHUSD,SOLUSD,DOGEUSD,LINKUSD
+TRADING_SYMBOLS=BTCUSD,ETHUSD,SOLUSD,XMRUSD,ATOMUSD,LINKUSD,DOGEUSD,PEPEUSD
+ALLOWED_ASSETS=BTC,ETH,SOL,XMR,ATOM,LINK,DOGE,PEPE   # Mandate whitelist
 CANDLE_INTERVAL=1                        # minutes
 MIN_CONFIDENCE=0.1                       # 0.0–1.0
 
@@ -140,41 +158,43 @@ MCP_PORT=3001
 
 ---
 
+## Dashboard (PRISM)
+
+Live dashboard at `http://localhost:3000`:
+
+- **Sidebar** — equity hero with sparkline graph, trust tier gradient card, dimension bars, SAGE status
+- **Hero Cards** — open positions, win rate, drawdown, uptime
+- **Signals Feed** — per-symbol strategy scores with symbol picker
+- **Narrative Card** — AI-generated trade rationale via Groq
+- **Positions Table** — live mark-to-market P&L with size, trust tier, slippage
+- **Governance Pipeline** — 6-stage visual driven by last checkpoint event type
+- **Decision Log** — IPFS checkpoint chain with integrity verification
+- **System Logs** — structured real-time feed with level badges (ERROR/WARN/INFO)
+
+---
+
 ## MCP Server
 
-The agent exposes an MCP (Model Context Protocol) server on port 3001 with 18 tools that let any LLM client inspect and control the agent in real time.
+The agent exposes an MCP (Model Context Protocol) server on port 3001 with 18 tools.
 
 See [MCP.md](MCP.md) for full tool reference.
 
 ```bash
-# Start MCP server standalone
-npm run mcp
+npm run mcp    # Start MCP server standalone
 ```
 
-Key tools: `get_agent_status`, `get_open_positions`, `get_recent_signals`, `get_risk_metrics`, `halt_agent`, `resume_agent`, `get_recent_logs`
-
----
-
-## Dashboard
-
-Live dashboard at `http://localhost:3000`:
-
-- **Signal Cards** — one card per strategy per fired signal
-- **Pipeline Stages** — 6-stage visual progress bar per cycle
-- **Open Positions** — live mark-to-market P&L
-- **Risk Metrics** — equity, drawdown, daily P&L, circuit breaker state
-- **Log Stream** — structured real-time log feed
+Key tools: `get_agent_status`, `get_open_positions`, `get_recent_signals`, `get_risk_metrics`, `halt_agent`, `resume_agent`, `get_recent_logs`, `get_adaptation_summary`
 
 ---
 
 ## Scripts
 
 ```bash
-npm run dev                  # Start agent (tsx)
+npm run dev                  # Start agent (tsx, hot reload)
 npm run build                # Compile TypeScript
 npm run start                # Run compiled build
-npm run register             # Register agent on ERC-8004 (once)
-npm run verify-checkpoints   # Verify IPFS checkpoint hashes
+npm run register             # Register agent on ERC-8004 (run once)
+npm run verify-checkpoints   # Verify IPFS checkpoint hash chain
 npm run demo-halt            # Demo emergency halt flow
 ```
 
@@ -185,44 +205,58 @@ npm run demo-halt            # Demo emergency halt flow
 ```
 sentinel-v3/
 ├── src/
-│   ├── agent/           # Core agent loop, config, logger, state, scheduler
-│   │   ├── index.ts     # Main 6-stage pipeline
-│   │   ├── config.ts    # All env var loading
-│   │   ├── logger.ts    # Structured logger (LogEntry objects)
-│   │   └── scheduler.ts # 60s cron loop
-│   ├── strategy/        # Trading strategies
-│   │   ├── ensemble.ts  # Runs all 3 strategies, picks best signal
-│   │   ├── order-block.ts
-│   │   ├── engulfing.ts
-│   │   ├── momentum.ts
-│   │   ├── indicators.ts # EMA, ATR, RSI, OB detection, FVG, BOS
+│   ├── agent/
+│   │   ├── index.ts          # Main 6-stage pipeline + adaptive learning loop
+│   │   ├── config.ts         # All env var loading + defaults
+│   │   ├── logger.ts         # Structured logger {time,level,logger,msg}
+│   │   ├── state.ts          # Cycle state, equity persistence
+│   │   ├── scheduler.ts      # 60s cron loop
+│   │   ├── trade-log.ts      # Closed trade records + stats
+│   │   └── operator-control.ts # Pause/resume/halt controls
+│   ├── strategy/
+│   │   ├── ensemble.ts       # Runs all 3, confluence boost, picks best signal
+│   │   ├── order-block.ts    # ICT/SMC order block retest strategy
+│   │   ├── engulfing.ts      # Engulfing candle at key level
+│   │   ├── momentum.ts       # EMA crossover + MACD, regime-aware
+│   │   ├── regime.ts         # ADX + RSI + EMA slope regime classifier
+│   │   ├── adaptive-learning.ts  # CAGE bounded self-improvement engine
+│   │   ├── sage-engine.ts    # SAGE: Groq/Gemini reflection + playbook rules
+│   │   ├── ai-reasoning.ts   # Claude→Groq→template narrative chain
+│   │   ├── indicators.ts     # EMA, ATR, RSI, OB, FVG, BOS, sweeps
 │   │   └── types.ts
-│   ├── chain/           # On-chain integrations
-│   │   ├── eip712.ts    # EIP-712 signing (TradeIntent + Checkpoint)
-│   │   ├── risk-router.ts # Risk Router submission, vault claim
-│   │   └── identity.ts  # ERC-8004 agent identity loading
-│   ├── risk/            # Risk management
-│   │   ├── manager.ts   # Position sizing, SL/TP, 2h auto-close
+│   ├── chain/
+│   │   ├── eip712.ts         # EIP-712 signing (TradeIntent + Checkpoint)
+│   │   ├── risk-router.ts    # Risk Router submission, vault claim
+│   │   ├── identity.ts       # ERC-8004 agent identity loading
+│   │   ├── agent-mandate.ts  # On-chain mandate evaluation (allowed assets)
+│   │   └── execution-simulator.ts # Slippage + net edge simulation gate
+│   ├── risk/
+│   │   ├── manager.ts        # Position sizing, SL/TP, trailing stop, 2h auto-close
 │   │   ├── circuit-breaker.ts
 │   │   └── volatility.ts
-│   ├── data/            # Market data
-│   │   ├── kraken-bridge.ts # REST API orders + paper mode
-│   │   ├── oracle.ts    # Candle fetching
-│   │   └── sentiment-feed.ts # Fear & Greed + funding proxy
-│   ├── dashboard/       # Web UI
-│   │   ├── server.ts
-│   │   └── SentinelDashboard.jsx
-│   └── mcp/             # MCP tool server
-│       └── server.ts
+│   ├── trust/
+│   │   ├── checkpoint.ts     # IPFS tamper-evident checkpoint chain
+│   │   ├── trust-scorecard.ts # 4-dimension trust score → tier → size factor
+│   │   └── artifact-emitter.ts
+│   ├── data/
+│   │   ├── kraken-bridge.ts  # REST API orders + full paper account
+│   │   ├── market.ts         # Candle + ticker fetching from Kraken
+│   │   └── sentiment-feed.ts # Fear & Greed + funding rate proxy
+│   ├── dashboard/
+│   │   ├── server.ts         # Express API server (status, trades, logs, checkpoints)
+│   │   ├── SentinelDashboard.jsx  # PRISM React UI (Babel in-browser)
+│   │   └── public/index.html
+│   ├── mcp/
+│   │   └── server.ts         # MCP JSON-RPC tool server (18 tools)
+│   ├── analytics/
+│   │   └── performance-metrics.ts
+│   └── security/
+│       └── oracle-integrity.ts
 ├── scripts/
-│   ├── register-agent.ts    # ERC-8004 registration + vault claim
+│   ├── register-agent.ts     # ERC-8004 registration + vault claim
 │   └── verify-checkpoints.ts
-├── docs/
-│   ├── TRADING.md           # Strategy details
-│   ├── MCP.md               # MCP tool reference
-│   └── HACKATHON.md         # Hackathon checklist
-├── agent-id.json        # Persisted agentId after registration
-└── .env                 # Environment variables (git-ignored)
+├── agent-id.json             # Persisted agentId after registration
+└── .env                      # Environment variables (git-ignored)
 ```
 
 ---

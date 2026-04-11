@@ -1,6 +1,6 @@
 # MCP Server — Sentinel v3
 
-Sentinel exposes a **Model Context Protocol (MCP)** server on port 3001. This allows any MCP-compatible LLM client (Claude, GPT, custom agent) to inspect and control the running agent in real time.
+Sentinel exposes a **Model Context Protocol (MCP)** server on port 3001. This allows any MCP-compatible LLM client (Claude, custom agent) to inspect and control the running agent in real time.
 
 ---
 
@@ -21,7 +21,7 @@ npm run mcp
 
 ## Connecting from Claude Code
 
-Add to your `.claude/settings.json` or use the Claude Code MCP config:
+Add to your `.claude/settings.json`:
 
 ```json
 {
@@ -40,18 +40,17 @@ Add to your `.claude/settings.json` or use the Claude Code MCP config:
 ### Agent Status & Control
 
 #### `get_agent_status`
-Returns full agent state including identity, mode, cycle count, last trade, and vault info.
+Returns full agent state: identity, mode, cycle count, symbols, last trade, vault info, trust tier.
 
 ```json
-// Response
 {
-  "agentId": 57,
+  "agentId": 19,
   "mode": "paper",
-  "cycle": 412,
-  "symbols": ["BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD", "LINKUSD"],
-  "lastTradeAt": "2026-04-10T10:29:09.000Z",
+  "cycle": 546,
+  "symbols": ["BTCUSD", "ETHUSD", "SOLUSD", "XMRUSD", "ATOMUSD", "LINKUSD", "DOGEUSD", "PEPEUSD"],
+  "lastTradeAt": "2026-04-11T14:20:04.000Z",
   "halted": false,
-  "vaultCapital": "0.001"
+  "equity": 9997.48
 }
 ```
 
@@ -65,7 +64,7 @@ Emergency halt — stops all new trade execution immediately.
 Resume agent after halt.
 
 #### `get_agent_identity`
-Returns ERC-8004 on-chain identity: agentId, wallet, active status, registration date.
+Returns ERC-8004 on-chain identity: agentId, wallet, active status, registration date, capabilities.
 
 ---
 
@@ -81,44 +80,46 @@ Returns the last N signals per strategy across all symbols.
 [
   {
     "symbol": "BTCUSD",
-    "strategy": "momentum",
-    "direction": "sell",
-    "confidence": 0.56,
-    "price": 71733.2,
-    "reasoning": "[MOMENTUM SELL] Trend continuation sep=-0.08% mom5=-0.05% RSI=48.2",
-    "timestamp": "2026-04-10T10:29:09.000Z"
+    "strategy": "order_block",
+    "direction": "buy",
+    "confidence": 0.86,
+    "price": 72758.9,
+    "reasoning": "[ORDER BLOCK BUY] Bullish OB [72700.00,72760.00] str=0.72 BOS=true FVG=false sweep=false",
+    "timestamp": "2026-04-11T14:20:03.000Z"
   }
 ]
 ```
 
 #### `get_strategy_scores`
-Returns current confidence scores for all 3 strategies across all symbols (same as the log line `order_block=0%(hold) | engulfing=82%(sell) | momentum=0%(hold)`).
+Returns current confidence scores for all 3 strategies across all symbols. Same data as the dashboard Signal Feed per-symbol picker.
 
 ---
 
 ### Positions & Trades
 
 #### `get_open_positions`
-Returns all currently open positions with unrealized P&L.
+Returns all currently open positions with live mark-to-market P&L.
 ```json
 [
   {
-    "id": 1,
+    "id": 3,
     "symbol": "BTCUSD",
-    "side": "sell",
-    "size": 0.00697,
-    "entryPrice": 71733.2,
-    "stopLoss": 72876.4,
-    "takeProfit": 70019.6,
-    "strategy": "momentum",
-    "openedAt": "2026-04-10T10:29:09.000Z",
-    "unrealizedPnl": -12.4
+    "side": "buy",
+    "size": 0.006183,
+    "entryPrice": 72758.9,
+    "stopLoss": 72600.5,
+    "takeProfit": 73800.4,
+    "strategy": "order_block",
+    "regime": "ranging",
+    "entryConfidence": 0.86,
+    "openedAt": "2026-04-11T14:20:04.000Z",
+    "unrealizedPnl": 12.4
   }
 ]
 ```
 
 #### `get_trade_history`
-Returns closed trades log with P&L, strategy, and duration.
+Returns closed trades log with P&L, strategy, duration, and exit reason.
 
 #### `get_performance_summary`
 Returns win rate, total P&L, Sharpe ratio approximation, max drawdown reached.
@@ -131,16 +132,16 @@ Returns win rate, total P&L, Sharpe ratio approximation, max drawdown reached.
 Returns live risk state.
 ```json
 {
-  "equity": 10000.00,
+  "equity": 9997.48,
   "peakEquity": 10000.00,
-  "drawdown": 0.0,
-  "dailyPnl": -24.5,
-  "openPositions": 3,
-  "totalExposure": 1500.00,
+  "drawdown": 0.003,
+  "dailyPnl": -2.52,
+  "openPositions": 4,
+  "totalExposure": 650.00,
   "status": "normal",
   "circuitBreaker": {
     "tripped": false,
-    "consecutiveLosses": 1
+    "consecutiveLosses": 0
   }
 }
 ```
@@ -153,13 +154,44 @@ Manually reset a tripped circuit breaker (use with caution).
 
 ---
 
+### Adaptive Learning
+
+#### `get_adaptation_summary`
+Returns current adaptive parameters, CAGE bounds, total outcomes recorded, and last adaptation artifact.
+
+```json
+{
+  "currentParams": {
+    "stopLossAtrMultiple": 1.58,
+    "basePositionPct": 0.019,
+    "confidenceThreshold": 0.12
+  },
+  "cage": {
+    "stopLossAtrMultiple": { "min": 1.0, "max": 2.5, "default": 1.5 },
+    "basePositionPct": { "min": 0.01, "max": 0.04, "default": 0.02 },
+    "confidenceThreshold": { "min": 0.05, "max": 0.30, "default": 0.10 }
+  },
+  "totalOutcomes": 12,
+  "totalAdaptations": 1,
+  "lastAdaptation": {
+    "parameter": "stopLossAtrMultiple",
+    "previousValue": 1.5,
+    "newValue": 1.58,
+    "trigger": "Stop-loss hit rate 65%",
+    "reasoning": "Stops widened because hit rate (65%) was above acceptable range."
+  }
+}
+```
+
+---
+
 ### On-Chain
 
 #### `get_on_chain_summary`
 Returns ERC-8004 on-chain status: agentId, vault balance, last TradeIntent hash, reputation score.
 
 #### `get_checkpoint_history`
-Returns recent IPFS checkpoints with CID, event type, and data hash.
+Returns recent IPFS checkpoints with CID, event type, data hash, and integrity status.
 
 #### `post_reputation_score`
 Manually post a reputation score to the Reputation Registry.
@@ -175,10 +207,10 @@ Manually post a reputation score to the Reputation Registry.
 Returns current prices and 24h changes for all tracked symbols.
 
 #### `get_sentiment`
-Returns current sentiment composite score and sources (Fear & Greed index, funding rate proxy).
+Returns current sentiment composite score and sources.
 ```json
 {
-  "composite": -0.44,
+  "composite": -0.53,
   "sources": ["fear_greed", "funding_proxy"],
   "fearGreed": 28,
   "fundingProxy": -0.62
@@ -193,15 +225,15 @@ Returns current sentiment composite score and sources (Fear & Greed index, fundi
 Returns the last N structured log entries.
 ```json
 // Input
-{ "limit": 50, "level": "warn" }
+{ "limit": 50, "errorsOnly": false }
 
 // Response
 [
   {
-    "time": "2026-04-10T10:29:10.000Z",
-    "level": "WARN",
-    "logger": "ROUTER",
-    "msg": "Submit failed: missing revert data..."
+    "time": "2026-04-11T14:20:04.000Z",
+    "level": "INFO",
+    "logger": "AGENT",
+    "msg": "[AGENT] ✓ Trade opened: BTCUSD BUY size=0.006183 @ 72758.9 | order_block | CP#761"
   }
 ]
 ```
@@ -215,23 +247,26 @@ Returns only ERROR-level log entries — useful for quick diagnostics.
 
 **File:** `src/mcp/server.ts`
 
-The server uses a lightweight HTTP + JSON-RPC transport. Each tool corresponds to a handler that reads live agent state from in-memory singletons (RiskManager, TradeLog, CheckpointStore) and returns structured JSON.
+The server uses a lightweight HTTP + JSON-RPC transport. Each tool reads live agent state from in-memory singletons (RiskManager, TradeLog, CheckpointStore, AdaptiveLearning) and returns structured JSON.
 
 The server is stateless from the client's perspective — every tool call reflects the current live state of the running agent.
 
 ---
 
-## Example: Using from Claude Code
+## Example: Inspecting from Claude Code
 
 ```
-You: What signals has the agent fired in the last 10 minutes?
-Claude: [calls get_recent_signals] → shows SOLUSD engulfing 82% sell, BTCUSD momentum 56% sell
+You: What signals fired in the last 10 minutes?
+Claude: [calls get_recent_signals] → BTCUSD order_block 86% buy, ETHUSD order_block 71% buy
 
 You: What's the current risk state?
-Claude: [calls get_risk_metrics] → equity=$10,024.50, drawdown=0.2%, 3 open positions
+Claude: [calls get_risk_metrics] → equity=$9,997.48, drawdown=0.03%, 4 open positions
+
+You: Has the agent learned anything from its trades?
+Claude: [calls get_adaptation_summary] → 12 outcomes recorded, SL multiple widened 1.5→1.58 after 65% stop-hit rate
 
 You: Halt the agent, something looks wrong
-Claude: [calls halt_agent with reason="User requested review"] → agent stops taking new trades
+Claude: [calls halt_agent] → agent stops taking new trades immediately
 ```
 
 ---
