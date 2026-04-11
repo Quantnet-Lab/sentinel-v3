@@ -152,6 +152,27 @@ export function isSAGEEnabled(): boolean {
 
 // ── LLM reflection ─────────────────────────────────────────────────────────────
 
+async function callGroq(prompt: string): Promise<string | null> {
+  if (!config.groqApiKey) return null;
+  try {
+    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.groqApiKey}` },
+      body: JSON.stringify({
+        model: 'qwen/qwen3-32b',
+        max_tokens: 600,
+        temperature: 0.2,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const data: any = await resp.json();
+    return data?.choices?.[0]?.message?.content ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function callGemini(prompt: string): Promise<string | null> {
   if (!config.geminiApiKey) return null;
   try {
@@ -208,7 +229,8 @@ Respond ONLY with valid JSON. No explanations outside the JSON.
 `;
 
   log.info('SAGE: Running reflection...');
-  const raw = await callGemini(prompt);
+  let raw = await callGemini(prompt);
+  if (!raw) raw = await callGroq(prompt);
   if (!raw) { log.warn('SAGE: LLM unavailable — no change'); return; }
 
   try {

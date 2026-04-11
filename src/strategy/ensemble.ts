@@ -57,6 +57,21 @@ export class EnsembleStrategy {
     }
 
     if (firedSignals.length > 0) {
+      // Confluence boost: when 2+ strategies agree on the same direction, reward it
+      if (firedSignals.length >= 2) {
+        const bullCount = firedSignals.filter(s => s.direction === 'buy').length;
+        const bearCount = firedSignals.filter(s => s.direction === 'sell').length;
+        const agreeingDir = bullCount >= 2 ? 'buy' : bearCount >= 2 ? 'sell' : null;
+        if (agreeingDir) {
+          const boost = firedSignals.length === 3 ? 0.08 : 0.05; // 3-way = stronger boost
+          for (const s of firedSignals) {
+            if (s.direction === agreeingDir) {
+              (s as any).confidence = Math.min(0.95, s.confidence + boost);
+              (s as any).reasoning = `[CONFLUENCE x${bullCount + bearCount}] ` + s.reasoning;
+            }
+          }
+        }
+      }
       return { regimeSignal, tradeSignal: firedSignals[0], tradeSignals: firedSignals, strategyEvaluations: evaluations };
     }
 

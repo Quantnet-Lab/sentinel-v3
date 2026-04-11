@@ -16,6 +16,7 @@ import { config } from './config.js';
 import {
   loadState, getState, incrementCycle,
   recordTrade, recordSignal, setHalted,
+  persistEquity, getPersistedEquity,
 } from './state.js';
 import {
   loadTradeLog, recordClosedTrade, generateTradeId, getTradeStats,
@@ -38,6 +39,8 @@ import { evaluateOracleIntegrity } from '../security/oracle-integrity.js';
 import { evaluateMandate } from '../chain/agent-mandate.js';
 import { getOperatorControlState } from './operator-control.js';
 import { submitTradeIntent, claimVaultCapital } from '../chain/risk-router.js';
+import { simulateExecution } from '../chain/execution-simulator.js';
+import { generateReasoning } from '../strategy/ai-reasoning.js';
 import type { ClosedTrade } from './trade-log.js';
 import type { TradeSignal } from '../strategy/types.js';
 
@@ -45,7 +48,7 @@ const log = createLogger('AGENT');
 
 // ── Module singletons ─────────────────────────────────────────────────────────
 
-const risk = new RiskManager(config.initialCapital ?? 10000);
+let risk = new RiskManager(config.initialCapital ?? 10000);
 const _ensemble = new EnsembleStrategy(config.strategy.minConfidence);
 
 let _identity: Awaited<ReturnType<typeof loadIdentity>> | null = null;
@@ -58,6 +61,9 @@ let _dailyLossBreaches = 0;
 let _circuitBreakerTrips = 0;
 let _mandateViolations = 0;
 let _ipfsPinnedCount = 0;
+
+// Trust-based position sizing factor (updated each broadcast from scorecard)
+let _trustSizeFactor = 1.0;
 
 // Session-level heartbeat / observability state
 const _startedAt = Date.now();
@@ -82,8 +88,12 @@ async function bootstrap(): Promise<void> {
   loadTradeLog();
   loadCheckpointHistory();
 
+  const savedEquity = getPersistedEquity(config.initialCapital ?? 10000);
+  risk = new RiskManager(savedEquity);
+  log.info(`[AGENT] Equity restored: $${savedEquity.toFixed(2)}`);
+
   if (config.executionMode === 'paper') {
-    await initPaperAccount(config.initialCapital ?? 10000);
+    await initPaperAccount(savedEquity);
   }
 
   _identity = await loadIdentity();
@@ -216,7 +226,7 @@ async function executeSignal(
 
     // Stage 4: Risk Gate — circuit breaker + position sizing + mandate
     const metrics = risk.getMetrics();
-    const riskDecision = risk.validate(signal, symbol, 1.0);
+    const riskDecision = risk.validate(signal, symbol, _trustSizeFactor);
 
     if (riskDecision.halted) {
       log.warn(`[AGENT] Circuit breaker: ${riskDecision.haltReason}`);
@@ -246,6 +256,19 @@ async function executeSignal(
       return;
     }
 
+    // Stage 4.5: Execution simulation — slippage, gas, net edge
+    const sim = simulateExecution({
+      signal,
+      riskDecision,
+      positionSize: riskDecision.positionSize,
+      volatilityRegime: signal.regime as 'low' | 'normal' | 'high' | 'extreme',
+    });
+    if (!sim.allowed) {
+      log.info(`[AGENT] Sim veto ${symbol}/${signal.strategy}: ${sim.reason} (slippage=${sim.estimatedSlippageBps}bps, edge=${sim.expectedNetEdgePct})`);
+      _vetoCount++;
+      return;
+    }
+
     // Stage 5: Execute order (paper fallback keeps pipeline alive even if Kraken rejects)
     const orderResult = await placeOrder({ symbol, side: signal.direction as 'buy' | 'sell', volume: riskDecision.positionSize });
     if (!orderResult.success) {
@@ -254,6 +277,13 @@ async function executeSignal(
 
     const position = risk.openPosition(symbol, signal, riskDecision, null);
     _lastTradeAt = new Date().toISOString();
+
+    // Generate AI narrative (non-blocking — fires and updates dashboard on completion)
+    generateReasoning(signal).then(result => {
+      _lastNarrative = { narrative: result.narrative, source: result.source, symbol, timestamp: new Date().toISOString() };
+      log.info(`[AGENT] Narrative via ${result.source} (${result.latencyMs}ms)`);
+      broadcastState();
+    }).catch(() => {});
 
     // Submit signed TradeIntent to ERC-8004 Risk Router — always fires (leaderboard)
     if (_identity?.agentId != null) {
@@ -274,7 +304,16 @@ async function executeSignal(
     // Stage 6: Record checkpoint
     const cp = await saveCheckpoint({
       eventType: 'trade', symbol, agentId: config.agentId, signal: signal.direction,
-      data: { strategy: signal.strategy, confidence: signal.confidence, price: signal.price, positionId: position.id },
+      data: {
+        strategy: signal.strategy,
+        confidence: signal.confidence,
+        price: signal.price,
+        positionId: position.id,
+        positionSize: riskDecision.positionSize,
+        supervisoryTier: _trustSizeFactor >= 1.0 ? 'elite' : _trustSizeFactor >= 0.9 ? 'elevated' : _trustSizeFactor >= 0.75 ? 'standard' : _trustSizeFactor >= 0.5 ? 'limited' : 'probation',
+        simSlippageBps: sim.estimatedSlippageBps,
+        netEdgePct: sim.expectedNetEdgePct,
+      },
     });
 
     if (config.validationRegistry && cp.signature && config.agentId != null) {
@@ -316,6 +355,7 @@ async function checkManagedPositions(): Promise<void> {
 
       const won = closed.pnl > 0;
       recordTrade(pos.symbol, won);
+      persistEquity(risk.getMetrics().equity);
       if (reason === 'stop_loss') _stopHitCount++;
       _lastTradeAt = new Date().toISOString();
 
@@ -405,6 +445,8 @@ function broadcastState(): void {
     stopHitCount: _stopHitCount,
     totalClosed: trStats.total,
   });
+
+  _trustSizeFactor = scorecard.sizeFactor;
 
   const shared = {
     cycle: state.cycle,

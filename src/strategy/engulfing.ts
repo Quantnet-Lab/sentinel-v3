@@ -35,6 +35,17 @@ export class EngulfingStrategy {
       return HOLD_SIGNAL(price, regime, 'No engulfing pattern', 'engulfing');
     }
 
+    // Body must be meaningful — at least 40% of ATR to filter tiny candles
+    const minBody = atrVal * 0.4;
+    if (currBody < minBody) {
+      return HOLD_SIGNAL(price, regime, `Engulfing body too small (${currBody.toFixed(4)} < ${minBody.toFixed(4)})`, 'engulfing');
+    }
+
+    // Body ratio must be at least 1.2x — not just marginally bigger
+    if (currBody / prevBody < 1.2) {
+      return HOLD_SIGNAL(price, regime, `Engulfing body ratio too weak (${(currBody/prevBody).toFixed(2)})`, 'engulfing');
+    }
+
     // Check proximity to key level
     const blocks = orderBlocks(candles.slice(0, -3), 10);
     const shighs = swingHighs(candles, 5);

@@ -33,6 +33,7 @@ export interface AgentState {
   lastHeartbeat: string | null;
   halted: boolean;
   haltReason: string | null;
+  equity: number | null;
 }
 
 const DEFAULT_SYMBOL_STATE: SymbolState = {
@@ -54,6 +55,7 @@ let _state: AgentState = {
   lastHeartbeat: null,
   halted: false,
   haltReason: null,
+  equity: null,
 };
 
 export function loadState(): AgentState {
@@ -116,6 +118,15 @@ export function setHalted(reason: string | null): void {
   _state.halted = reason !== null;
   _state.haltReason = reason;
   persistState();
+}
+
+export function persistEquity(equity: number): void {
+  _state.equity = equity;
+  persistState();
+}
+
+export function getPersistedEquity(fallback: number): number {
+  return _state.equity ?? fallback;
 }
 
 export function getWinRate(): number {

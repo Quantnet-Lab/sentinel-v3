@@ -10,79 +10,96 @@
  */
 
 import type { Candle, TradeSignal, MarketRegime } from './types.js';
-import { closes, ema, rsiLast, atrLast } from './indicators.js';
+import { closes, ema, macd, rsiLast, atrLast } from './indicators.js';
 import { HOLD_SIGNAL } from './types.js';
 
 export class MomentumStrategy {
   generate(candles: Candle[], regime: MarketRegime): TradeSignal {
     if (candles.length < 60) return HOLD_SIGNAL(candles.at(-1)?.close ?? 0, regime, 'Not enough data', 'momentum');
 
+    // Suppress momentum only in ranging — volatile crypto markets often have the strongest momentum moves
+    if (regime === 'ranging') {
+      return HOLD_SIGNAL(candles.at(-1)?.close ?? 0, regime, 'Momentum suppressed in ranging regime', 'momentum');
+    }
+
     const c     = closes(candles);
     const price = c[c.length - 1];
     const atr   = atrLast(candles, 14);
     const rsi   = rsiLast(c, 14);
 
-    // SMA via EMA (same values at period boundaries, faster)
-    const sma20 = ema(c, 20);
-    const sma50 = ema(c, 50);
+    const ema20 = ema(c, 20);
+    const ema50 = ema(c, 50);
 
-    const s20      = sma20[sma20.length - 1];
-    const s20prev  = sma20[sma20.length - 2];
-    const s50      = sma50[sma50.length - 1];
-    const s50prev  = sma50[sma50.length - 2];
+    const e20     = ema20[ema20.length - 1];
+    const e20prev = ema20[ema20.length - 2];
+    const e50     = ema50[ema50.length - 1];
+    const e50prev = ema50[ema50.length - 2];
 
-    // SMA separation as % of price
-    const separation = (s20 - s50) / price;
+    // EMA separation as % of price — raised to 0.3% to filter weak trends
+    const separation = (e20 - e50) / price;
 
     // 5-bar short momentum
     const momentum5 = (price - c[c.length - 6]) / c[c.length - 6];
 
-    // Crossover detection
-    const bullCross = s20prev < s50prev && s20 > s50;
-    const bearCross = s20prev > s50prev && s20 < s50;
+    // MACD confirmation — histogram must be positive/negative and growing
+    const macdResult = macd(c, 12, 26, 9);
+    const hist     = macdResult.histogram;
+    const histLast = hist[hist.length - 1];
+    const histPrev = hist[hist.length - 2];
+    const macdBull = !isNaN(histLast) && histLast > 0 && histLast > histPrev;
+    const macdBear = !isNaN(histLast) && histLast < 0 && histLast < histPrev;
 
-    // Trend continuation — lowered to 0.05% so it fires in ranging markets too
-    const bullTrend = separation > 0.0005 && momentum5 > 0;
-    const bearTrend = separation < -0.0005 && momentum5 < 0;
+    // Crossover detection — fresh cross is strong enough on its own (MACD lags 15min crypto)
+    const bullCross = e20prev < e50prev && e20 > e50;
+    const bearCross = e20prev > e50prev && e20 < e50;
 
+    // Trend continuation — requires 0.3% separation AND MACD alignment
+    const bullTrend = separation > 0.003 && momentum5 > 0 && macdBull;
+    const bearTrend = separation < -0.003 && momentum5 < 0 && macdBear;
+
+    // Crossover standalone valid; continuation needs MACD confirmation
     const isBull = bullCross || bullTrend;
     const isBear = bearCross || bearTrend;
 
     if (!isBull && !isBear) {
-      return HOLD_SIGNAL(price, regime, `No trend. Sep=${(separation*100).toFixed(2)}%, Mom5=${(momentum5*100).toFixed(2)}%`, 'momentum');
+      return HOLD_SIGNAL(price, regime, `No trend. Sep=${(separation*100).toFixed(2)}%, MACD hist=${histLast?.toFixed(4)}`, 'momentum');
     }
 
-    // Score: base + separation strength + momentum alignment + RSI filter
-    const sepStrength = Math.min(Math.abs(separation) / 0.003, 1.0); // caps at 0.3% sep
-    const momStrength = Math.min(Math.abs(momentum5) / 0.001, 1.0);  // caps at 0.1% mom
+    const sepStrength = Math.min(Math.abs(separation) / 0.01, 1.0);  // caps at 1% sep
+    const momStrength = Math.min(Math.abs(momentum5) / 0.005, 1.0);  // caps at 0.5% mom
+    const macdStrength = Math.min(Math.abs(histLast ?? 0) / (atr * 0.1 || 1), 1.0);
 
-    if (isBull && rsi < 75) {
+    // Crypto-adjusted RSI limits — crypto runs hot, RSI 70-85 is normal in bull trends
+    const volatilePenalty = regime === 'volatile' ? -0.05 : 0;
+    const slMultiple = regime === 'volatile' ? 2.5 : 2.0; // wider stops in volatile crypto
+
+    if (isBull && rsi < 80) {
       const crossBonus = bullCross ? 0.1 : 0;
-      const confidence = Math.min(0.85, 0.45 + sepStrength * 0.2 + momStrength * 0.15 + crossBonus);
+      const confidence = Math.min(0.87, 0.50 + sepStrength * 0.15 + momStrength * 0.1 + macdStrength * 0.1 + crossBonus + volatilePenalty);
       return {
         direction: 'buy',
         confidence,
         strategy: 'momentum',
         price,
-        stopLoss:   price - atr * 2,
+        stopLoss:   price - atr * slMultiple,
         takeProfit: price + atr * 3,
-        reasoning:  `[MOMENTUM BUY] ${bullCross ? 'SMA crossover' : 'Trend continuation'} sep=${(separation*100).toFixed(2)}% mom5=${(momentum5*100).toFixed(2)}% RSI=${rsi.toFixed(1)}`,
+        reasoning:  `[MOMENTUM BUY] ${bullCross ? 'EMA cross' : 'Trend continuation'} sep=${(separation*100).toFixed(2)}% MACD=${histLast?.toFixed(4)} RSI=${rsi.toFixed(1)}`,
         regime,
         timestamp: new Date().toISOString(),
       };
     }
 
-    if (isBear && rsi > 25) {
+    if (isBear && rsi > 20) {
       const crossBonus = bearCross ? 0.1 : 0;
-      const confidence = Math.min(0.85, 0.45 + sepStrength * 0.2 + momStrength * 0.15 + crossBonus);
+      const confidence = Math.min(0.87, 0.50 + sepStrength * 0.15 + momStrength * 0.1 + macdStrength * 0.1 + crossBonus + volatilePenalty);
       return {
         direction: 'sell',
         confidence,
         strategy: 'momentum',
         price,
-        stopLoss:   price + atr * 2,
+        stopLoss:   price + atr * slMultiple,
         takeProfit: price - atr * 3,
-        reasoning:  `[MOMENTUM SELL] ${bearCross ? 'SMA crossover' : 'Trend continuation'} sep=${(separation*100).toFixed(2)}% mom5=${(momentum5*100).toFixed(2)}% RSI=${rsi.toFixed(1)}`,
+        reasoning:  `[MOMENTUM SELL] ${bearCross ? 'EMA cross' : 'Trend continuation'} sep=${(separation*100).toFixed(2)}% MACD=${histLast?.toFixed(4)} RSI=${rsi.toFixed(1)}`,
         regime,
         timestamp: new Date().toISOString(),
       };
