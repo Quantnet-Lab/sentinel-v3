@@ -41,6 +41,7 @@ import { getOperatorControlState } from './operator-control.js';
 import { submitTradeIntent, claimVaultCapital } from '../chain/risk-router.js';
 import { simulateExecution } from '../chain/execution-simulator.js';
 import { generateReasoning } from '../strategy/ai-reasoning.js';
+import { recordTradeOutcome, runAdaptation, getAdaptiveParams } from '../strategy/adaptive-learning.js';
 import type { ClosedTrade } from './trade-log.js';
 import type { TradeSignal } from '../strategy/types.js';
 
@@ -72,7 +73,8 @@ let _lastTradeAt: string | null = null;
 let _consecutiveErrors = 0;
 let _lastNarrative: { narrative: string; source: string; symbol: string; timestamp: string } | null = null;
 let _lastSentiment: Record<string, unknown> | null = null;
-let _lastEvaluations: { symbol: string; evaluations: { name: string; signal: string; confidence: number }[] } | null = null;
+// All strategy evaluations from last cycle, keyed by symbol
+const _allEvaluations: Record<string, { name: string; signal: string; confidence: number }[]> = {};
 // All signals that fired last cycle, keyed by symbol
 const _lastFiredSignals: Record<string, { symbol: string; direction: string; confidence: number; strategy: string; reasoning: string; timestamp: string }[]> = {};
 
@@ -139,6 +141,14 @@ async function runCycle(): Promise<void> {
   await Promise.allSettled(config.symbols.map(symbol => processSymbol(symbol)));
 
   await checkManagedPositions();
+
+  // Run adaptive learning after every cycle — adjusts SL multiplier, position size, confidence threshold
+  const artifacts = runAdaptation(getState().cycle);
+  if (artifacts.length > 0) {
+    const adapted = getAdaptiveParams();
+    log.info(`[ADAPT] ${artifacts.length} param(s) adapted | SL×${adapted.stopLossAtrMultiple.toFixed(2)} pos=${(adapted.basePositionPct * 100).toFixed(1)}% conf≥${(adapted.confidenceThreshold * 100).toFixed(1)}%`);
+  }
+
   broadcastState();
 }
 
@@ -146,6 +156,10 @@ async function runCycle(): Promise<void> {
 
 async function processSymbol(symbol: string): Promise<void> {
   try {
+    // Skip if already holding a position on this symbol — no pyramiding
+    const hasOpenPosition = risk.getPositions().some(p => p.symbol === symbol);
+    if (hasOpenPosition) return;
+
     // Stage 1: Oracle — fetch candles + data integrity check
     const [candles, tickerMap] = await Promise.all([
       fetchCandles(symbol, config.candleInterval ?? 1, 200),
@@ -174,7 +188,7 @@ async function processSymbol(symbol: string): Promise<void> {
     // Stage 2: Signal — run 3-strategy ensemble
     const ensembleResult = _ensemble.analyze(candles);
     _totalSignals++;
-    _lastEvaluations = { symbol, evaluations: ensembleResult.strategyEvaluations };
+    _allEvaluations[symbol] = ensembleResult.strategyEvaluations;
     log.info(`[AGENT] ${symbol} scores: ${ensembleResult.strategyEvaluations.map(e => `${e.name}=${(e.confidence*100).toFixed(0)}%(${e.signal})`).join(' | ')}`);
 
     let firedSignals: TradeSignal[] = [...ensembleResult.tradeSignals];
@@ -344,6 +358,12 @@ async function checkManagedPositions(): Promise<void> {
       const { close, reason } = risk.shouldClose(pos, price);
       if (!close) continue;
 
+      // Grace period: ignore stop_loss triggers within the first 5 minutes.
+      // The live ticker price can diverge from the candle close used as entry,
+      // causing an immediate stop-out on the same cycle the trade was opened.
+      const ageMs = Date.now() - new Date(pos.openedAt).getTime();
+      if (reason === 'stop_loss' && ageMs < 5 * 60 * 1000) continue;
+
       await placeOrder({
         symbol: pos.symbol,
         side: pos.side === 'buy' ? 'sell' : 'buy',
@@ -358,6 +378,18 @@ async function checkManagedPositions(): Promise<void> {
       persistEquity(risk.getMetrics().equity);
       if (reason === 'stop_loss') _stopHitCount++;
       _lastTradeAt = new Date().toISOString();
+
+      // Feed outcome into adaptive learning engine with real position metadata
+      recordTradeOutcome({
+        direction: pos.side,
+        entryPrice: pos.entryPrice,
+        exitPrice: price,
+        pnlPct: closed.pnlPct,
+        stopHit: reason === 'stop_loss',
+        regime: (pos.regime ?? 'normal') as 'low' | 'normal' | 'high' | 'extreme',
+        confidence: pos.entryConfidence ?? 0.6,
+        timestamp: new Date().toISOString(),
+      });
 
 
       const trade: ClosedTrade = {
@@ -485,7 +517,7 @@ function broadcastState(): void {
     },
     narrative: _lastNarrative,
     sentiment: _lastSentiment,
-    strategyEvaluations: _lastEvaluations,
+    strategyEvaluations: _allEvaluations,
   };
 
   injectDashboard(shared);

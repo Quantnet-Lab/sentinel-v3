@@ -7,7 +7,7 @@ import type { Candle, MarketRegime, RegimeSignal, VolatilityRegime } from './typ
 import { adxLast, rsiLast, ema, atrLast, closes } from './indicators.js';
 
 export class RegimeDetector {
-  private readonly adxTrendThreshold = 25;
+  private readonly adxTrendThreshold = 20; // lowered from 25 — altcoins trend at lower ADX values
   private readonly adxStrongThreshold = 40;
   private readonly rsiOverbought = 70;
   private readonly rsiOversold = 30;

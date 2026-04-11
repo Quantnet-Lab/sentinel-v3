@@ -36,6 +36,8 @@ export interface Position {
   atr: number | null;
   ipfsCid: string | null;
   txHash: string | null;
+  regime: string;
+  entryConfidence: number;
 }
 
 export interface ComplianceCheck {
@@ -183,6 +185,8 @@ export class RiskManager {
       atr,
       ipfsCid: null,
       txHash: null,
+      regime: signal.regime ?? 'unknown',
+      entryConfidence: signal.confidence ?? 0.6,
     };
     this.positions.set(pos.id, pos);
     log.info(`[RISK] Opened position #${pos.id} ${symbol} ${signal.direction} @ ${signal.price.toFixed(4)}, size=${pos.size.toFixed(6)}`);

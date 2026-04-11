@@ -1,886 +1,975 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 
-/* ═══════════════════════════════════════════════════════════════════════
-   SENTINEL v3 — Institutional SMC Trading Agent
-   ERC-8004 Trust-Governed · 6-Stage Governance Pipeline
-   Live Proof Dashboard · Production Control Plane
-   ═══════════════════════════════════════════════════════════════════════ */
+/* ─────────────────────────────────────────────────────────────────────────────
+   SENTINEL v3  —  PRISM Dashboard
+   Sidebar layout · Glassmorphism cards · Inter font · Indigo/violet accent
+───────────────────────────────────────────────────────────────────────────── */
 
-const PIPELINE_STAGES = [
-  "Oracle","Signal","Sentiment","Risk Gate","Execute","Record",
-];
-
-const clamp = (v,lo,hi) => Math.max(lo,Math.min(hi,v));
-const pct   = (v,d=1)   => `${(v*100).toFixed(d)}%`;
-const usd   = (v)       => `$${Number(v).toFixed(2)}`;
-const fmt   = (v,d=2)   => Number(v).toFixed(d);
-const ago   = (ms) => {
-  if (ms == null) return "never";
-  const s = Math.floor(ms/1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s/60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m/60);
-  if (h < 24) return `${h}h ${m%60}m ago`;
-  return `${Math.floor(h/24)}d ${h%24}h ago`;
+// ── Palette ──────────────────────────────────────────────────────────────────
+const C = {
+  bg:       "#0d0d14",
+  surface:  "rgba(255,255,255,0.04)",
+  surfaceHi:"rgba(255,255,255,0.07)",
+  border:   "rgba(255,255,255,0.07)",
+  borderHi: "rgba(255,255,255,0.13)",
+  text:     "#f1f5f9",
+  textSec:  "#94a3b8",
+  textMut:  "#475569",
+  indigo:   "#6366f1",
+  indigoDim:"rgba(99,102,241,0.15)",
+  violet:   "#8b5cf6",
+  violetDim:"rgba(139,92,246,0.12)",
+  emerald:  "#10b981",
+  emeraldDim:"rgba(16,185,129,0.10)",
+  rose:     "#f43f5e",
+  roseDim:  "rgba(244,63,94,0.10)",
+  amber:    "#f59e0b",
+  amberDim: "rgba(245,158,11,0.10)",
+  sky:      "#38bdf8",
+  skyDim:   "rgba(56,189,248,0.10)",
 };
-const uptime = (ms) => {
-  const s = Math.floor(ms/1000), h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const usd    = v => "$" + Number(v ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const pct    = (v, d = 1) => `${(v * 100).toFixed(d)}%`;
+const num    = (v, d = 2) => Number(v ?? 0).toFixed(d);
+const ago    = ms => {
+  if (!ms) return "—";
+  const s = Math.floor((Date.now() - new Date(ms).getTime()) / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.floor(m / 60)}h ${m % 60}m ago`;
+};
+const uptime = ms => {
+  if (!ms) return "—";
+  const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 };
+const buyColor  = d => d === "buy"  || d === "BUY"  ? C.emerald : d === "sell" || d === "SELL" ? C.rose : C.textSec;
+const tierColor = t => ({ elite: C.indigo, elevated: C.violet, standard: C.sky, limited: C.amber, probation: C.rose }[t] ?? C.textMut);
+const tierGrad  = t => ({ elite: `linear-gradient(135deg,${C.indigo},${C.violet})`, elevated: `linear-gradient(135deg,${C.violet},${C.sky})`, standard: `linear-gradient(135deg,${C.sky},${C.emerald})`, limited: `linear-gradient(135deg,${C.amber},${C.rose})`, probation: `linear-gradient(135deg,${C.rose},#7f1d1d)` }[t] ?? C.surface);
 
-/* ── Design tokens ─────────────────────────────────────────────────────────── */
-const T = {
-  bg:  "#080b11", s1: "#0c1018", s2: "#111621", s3: "#161c29",
-  brd: "#1c2536", brdA: "#253045",
-  fg:  "#c9d1dc", fg2: "#7c8a9e", fg3: "#4b5668", w: "#edf2f7",
-  up:  "#34d399", dn: "#f87171", warn: "#fbbf24",
-  info: "#60a5fa", cyan: "#22d3ee", purple: "#a78bfa",
-};
-const F = "'JetBrains Mono','SF Mono','Cascadia Code',monospace";
-
-/* ── Color helpers ─────────────────────────────────────────────────────────── */
-const dirColor = (d) => d === "buy" || d === "BUY" || d === "LONG" ? T.up : d === "sell" || d === "SELL" || d === "SHORT" ? T.dn : T.fg2;
-const tierColor = (t) => { if (t === "elite" || t === "elevated") return T.up; if (t === "standard") return T.info; if (t === "limited") return T.warn; return T.dn; };
-const eventColor = (e) => { if (e === "trade") return T.up; if (e === "halt") return T.dn; if (e === "veto") return T.warn; if (e === "close") return T.info; return T.fg3; };
-const truC = (s) => s >= 85 ? T.up : s >= 70 ? T.info : s >= 55 ? T.warn : T.dn;
-const sentColor = (v) => v > 0.08 ? T.up : v < -0.08 ? T.dn : T.warn;
-const sentLabel = (v) => v > 0.3 ? "BULLISH" : v > 0.08 ? "MILD BULL" : v < -0.3 ? "BEARISH" : v < -0.08 ? "MILD BEAR" : "NEUTRAL";
-
-/* ── Primitives ────────────────────────────────────────────────────────────── */
-function Dot({ color, pulse }) {
+// ── Base components ───────────────────────────────────────────────────────────
+const Card = ({ children, style, onClick, hover }) => {
+  const [h, setH] = useState(false);
   return (
-    <span style={{
-      display:"inline-block", width:7, height:7, borderRadius:"50%",
-      background:color, flexShrink:0,
-      boxShadow: pulse ? `0 0 0 3px ${color}30, 0 0 8px ${color}60` : `0 0 5px ${color}50`,
-    }} />
-  );
-}
-
-function Badge({ children, color = T.info }) {
-  return (
-    <span style={{
-      fontSize:9, fontWeight:700, color,
-      background:`${color}18`, padding:"1px 6px",
-      borderRadius:2, whiteSpace:"nowrap", letterSpacing:0.3,
-    }}>
+    <div
+      onClick={onClick}
+      onMouseEnter={() => hover && setH(true)}
+      onMouseLeave={() => hover && setH(false)}
+      style={{
+        background: h ? C.surfaceHi : C.surface,
+        border: `1px solid ${h ? C.borderHi : C.border}`,
+        borderRadius: 16, padding: 20,
+        transition: "all 0.2s",
+        cursor: onClick ? "pointer" : "default",
+        ...style,
+      }}
+    >
       {children}
-    </span>
-  );
-}
-
-function Bar({ value, color = T.up, height = 4 }) {
-  return (
-    <div style={{ height, background:T.bg, borderRadius:2, overflow:"hidden", marginTop:3 }}>
-      <div style={{
-        height:"100%", width:`${clamp(value,0,1)*100}%`,
-        background:color, borderRadius:2, transition:"width .5s ease",
-      }} />
     </div>
   );
+};
+
+const Label = ({ children, style }) => (
+  <div style={{ fontSize: 11, fontWeight: 600, color: C.textMut, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6, ...style }}>
+    {children}
+  </div>
+);
+
+const Pill = ({ children, color = C.indigo, style }) => (
+  <span style={{
+    display: "inline-flex", alignItems: "center",
+    padding: "3px 10px", borderRadius: 999,
+    fontSize: 11, fontWeight: 600,
+    background: color + "20", color,
+    border: `1px solid ${color}30`,
+    ...style,
+  }}>
+    {children}
+  </span>
+);
+
+const Dot = ({ color, pulse }) => (
+  <span style={{
+    display: "inline-block", width: 7, height: 7, borderRadius: "50%",
+    background: color, flexShrink: 0,
+    boxShadow: `0 0 6px ${color}80`,
+    animation: pulse ? "pulse 1.8s infinite" : "none",
+  }} />
+);
+
+const Bar = ({ value, color, height = 4 }) => (
+  <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: 999, height, overflow: "hidden" }}>
+    <div style={{ width: `${Math.min(100, Math.max(0, value * 100))}%`, height: "100%", background: color, borderRadius: 999, transition: "width 0.6s ease" }} />
+  </div>
+);
+
+const Divider = () => <div style={{ height: 1, background: C.border, margin: "16px 0" }} />;
+
+// ── Data hook ─────────────────────────────────────────────────────────────────
+function useData() {
+  const [status,  setStatus]  = useState(null);
+  const [trades,  setTrades]  = useState({ trades: [], stats: {} });
+  const [sage,    setSage]    = useState(null);
+  const [logs,    setLogs]    = useState([]);
+  const [checks,  setChecks]  = useState({ checkpoints: [], stats: {}, integrity: {} });
+
+  const load = useCallback(async () => {
+    const safe = async (url, fb) => { try { const r = await fetch(url); return r.ok ? r.json() : fb; } catch { return fb; } };
+    const [s, t, sg, l, c] = await Promise.all([
+      safe("/api/status", null),
+      safe("/api/trades", { trades: [], stats: {} }),
+      safe("/api/sage", null),
+      safe("/api/logs?limit=60", []),
+      safe("/api/checkpoints?limit=30", { checkpoints: [], stats: {}, integrity: {} }),
+    ]);
+    if (s) setStatus(s);
+    setTrades(t);
+    if (sg) setSage(sg);
+    setLogs(l);
+    setChecks(c);
+  }, []);
+
+  useEffect(() => { load(); const id = setInterval(load, 5000); return () => clearInterval(id); }, [load]);
+  return { status, trades, sage, logs, checks };
 }
 
-function Spark({ data = [], h = 48, color }) {
-  if (data.length < 2) return <div style={{ height:h, background:T.s1, borderRadius:3 }} />;
-  const W=400, mn=Math.min(...data)-1e-9, mx=Math.max(...data)+1e-9, rng=mx-mn;
-  const sx = W/(data.length-1);
-  const pts = data.map((v,i)=>`${i*sx},${h-((v-mn)/rng)*(h-6)-3}`).join(" ");
-  const c = color || (data[data.length-1]>=data[0] ? T.up : T.dn);
-  const gid = `sg${Math.abs(c.replace(/#/g,"").charCodeAt(0))}${data.length}`;
+// ── Equity sparkline ──────────────────────────────────────────────────────────
+function EquitySparkline({ checks, equity }) {
+  const points = (checks?.checkpoints ?? [])
+    .filter(cp => cp.data?.equity != null)
+    .map(cp => cp.data.equity)
+    .slice(-40);
+  // Append current equity so the line always ends at the live value
+  if (equity != null) points.push(equity);
+  if (points.length < 2) return null;
+
+  const W = 212, H = 44;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const range = max - min || 1;
+  const xs = points.map((_, i) => (i / (points.length - 1)) * W);
+  const ys = points.map(v => H - ((v - min) / range) * H);
+  const d = xs.map((x, i) => `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${ys[i].toFixed(1)}`).join(" ");
+  const fill = xs.map((x, i) => `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${ys[i].toFixed(1)}`).join(" ")
+    + ` L ${W} ${H} L 0 ${H} Z`;
+  const isUp = points[points.length - 1] >= points[0];
+  const col  = isUp ? C.emerald : C.rose;
+
   return (
-    <svg width="100%" height={h} viewBox={`0 0 ${W} ${h}`} preserveAspectRatio="none">
+    <svg width={W} height={H} style={{ display: "block", marginTop: 10, overflow: "visible" }}>
       <defs>
-        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={c} stopOpacity=".15"/>
-          <stop offset="100%" stopColor={c} stopOpacity="0"/>
+        <linearGradient id="spkGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stopColor={col} stopOpacity="0.25" />
+          <stop offset="100%" stopColor={col} stopOpacity="0" />
         </linearGradient>
       </defs>
-      <polygon points={`0,${h} ${pts} ${(data.length-1)*sx},${h}`} fill={`url(#${gid})`}/>
-      <polyline points={pts} fill="none" stroke={c} strokeWidth="1.5" strokeLinejoin="round"/>
+      <path d={fill} fill="url(#spkGrad)" />
+      <path d={d} fill="none" stroke={col} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={xs[xs.length - 1]} cy={ys[ys.length - 1]} r="3" fill={col} />
     </svg>
   );
 }
 
-function Panel({ title, tag, tip, children, style: sx, full, noPad }) {
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+function Sidebar({ status, trades, sage, checks }) {
+  const trust   = status?.trust ?? {};
+  const metrics = status?.riskMetrics ?? {};
+  const hb      = status?.heartbeat ?? {};
+  const tier    = trust.tier ?? "probation";
+  const score   = (trust.overall ?? 0) * 100;
+  const sf      = (trust.sizeFactor ?? 0) * 100;
+  const equity  = metrics.equity ?? 0;
+  const init    = status?.initialCapital ?? 10000;
+  const pnlAll  = equity - init;
+  const pnlPct  = init > 0 ? pnlAll / init : 0;
+  const isUp    = pnlAll >= 0;
+
   return (
     <div style={{
-      background:T.s1, border:`1px solid ${T.brd}`, borderRadius:6,
-      overflow:"hidden", display:"flex", flexDirection:"column",
-      gridColumn: full ? "1 / -1" : undefined, ...sx,
+      width: 256, flexShrink: 0, display: "flex", flexDirection: "column", gap: 12,
+      height: "100vh", overflowY: "auto", padding: "16px 12px",
+      borderRight: `1px solid ${C.border}`, background: "rgba(0,0,0,0.25)",
+      position: "sticky", top: 0,
     }}>
-      <div style={{
-        display:"flex", justifyContent:"space-between", alignItems:"center",
-        padding:"7px 12px", borderBottom:`1px solid ${T.brd}`,
-        background:T.s2, flexShrink:0,
-      }}>
-        <span title={tip} style={{ fontSize:10.5, fontWeight:700, color:T.fg, letterSpacing:0.4, cursor:tip?"help":"default" }}>{title}</span>
-        {tag && <span style={{ fontSize:8.5, color:T.fg3, fontWeight:600 }}>{tag}</span>}
+      {/* Logo */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 8px 12px" }}>
+        <div style={{
+          width: 34, height: 34, borderRadius: 10, flexShrink: 0,
+          background: "linear-gradient(135deg,#6366f1,#8b5cf6)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 14, fontWeight: 800, color: "#fff",
+          boxShadow: "0 4px 12px rgba(99,102,241,0.4)",
+        }}>S</div>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: C.text, letterSpacing: "0.04em" }}>SENTINEL</div>
+          <div style={{ fontSize: 10, color: C.textMut, fontWeight: 500 }}>v3 · ERC-8004</div>
+        </div>
       </div>
-      <div style={noPad ? { flex:1 } : { padding:"8px 12px", flex:1 }}>{children}</div>
+
+      {/* Status pills */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "0 4px" }}>
+        <Pill color={status?.halted ? C.rose : C.emerald}>
+          <Dot color={status?.halted ? C.rose : C.emerald} pulse={!status?.halted} />
+          <span style={{ marginLeft: 5 }}>{status?.halted ? "HALTED" : "LIVE"}</span>
+        </Pill>
+        <Pill color={C.textSec}>{(status?.executionMode ?? "paper").toUpperCase()}</Pill>
+      </div>
+
+      <Divider />
+
+      {/* Equity */}
+      <div style={{ padding: "0 4px" }}>
+        <Label>Portfolio Equity</Label>
+        <div style={{ fontSize: 26, fontWeight: 800, color: C.text, letterSpacing: "-0.02em" }}>{usd(equity)}</div>
+        <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
+          <Dot color={isUp ? C.emerald : C.rose} />
+          <span style={{ fontSize: 12, fontWeight: 600, color: isUp ? C.emerald : C.rose }}>
+            {isUp ? "+" : ""}{usd(pnlAll)} ({isUp ? "+" : ""}{pct(pnlPct)})
+          </span>
+        </div>
+        <EquitySparkline checks={checks} equity={equity} />
+        <div style={{ marginTop: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.textSec, marginBottom: 4 }}>
+            <span>Daily P&L</span>
+            <span style={{ color: metrics.dailyPnl >= 0 ? C.emerald : C.rose, fontWeight: 600 }}>
+              {metrics.dailyPnl >= 0 ? "+" : ""}{usd(metrics.dailyPnl ?? 0)}
+            </span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.textSec }}>
+            <span>Drawdown</span>
+            <span style={{ color: (metrics.drawdown ?? 0) > 0.05 ? C.rose : C.textSec, fontWeight: 600 }}>
+              {pct(metrics.drawdown ?? 0)}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <Divider />
+
+      {/* Trust tier */}
+      <div style={{ padding: "0 4px" }}>
+        <Label>Trust Tier</Label>
+        <div style={{
+          padding: "12px 14px", borderRadius: 12,
+          background: tierGrad(tier), marginBottom: 10,
+        }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", textTransform: "uppercase", letterSpacing: "0.08em" }}>{tier}</div>
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginTop: 2 }}>{num(score, 0)}% trust score</div>
+        </div>
+        <div style={{ marginBottom: 6 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.textSec, marginBottom: 4 }}>
+            <span>Size Factor</span>
+            <span style={{ fontWeight: 600, color: C.text }}>{num(sf, 0)}%</span>
+          </div>
+          <Bar value={trust.sizeFactor ?? 0} color={tierColor(tier)} />
+        </div>
+
+        {/* Dimension bars */}
+        {trust.dimensions && Object.entries(trust.dimensions).map(([key, dim]) => {
+          const label = { policyCompliance: "Policy", riskDiscipline: "Risk", validationCompleteness: "Validation", outcomeQuality: "Outcomes" }[key] ?? key;
+          const col = dim.score >= 0.7 ? C.emerald : dim.score >= 0.5 ? C.sky : dim.score >= 0.3 ? C.amber : C.rose;
+          return (
+            <div key={key} style={{ marginBottom: 6 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.textMut, marginBottom: 3 }}>
+                <span>{label}</span>
+                <span style={{ color: col, fontWeight: 600 }}>{pct(dim.score ?? 0, 0)}</span>
+              </div>
+              <Bar value={dim.score ?? 0} color={col} height={3} />
+            </div>
+          );
+        })}
+      </div>
+
+      <Divider />
+
+      {/* Agent info */}
+      <div style={{ padding: "0 4px" }}>
+        <Label>Agent</Label>
+        <div style={{ fontSize: 11, color: C.textSec, lineHeight: 1.8 }}>
+          <div>ID <span style={{ color: C.text, fontWeight: 600 }}>#{status?.agentId ?? "—"}</span></div>
+          <div>Cycle <span style={{ color: C.text, fontWeight: 600 }}>{status?.cycle ?? "—"}</span></div>
+          <div>Uptime <span style={{ color: C.text, fontWeight: 600 }}>{uptime(hb.uptimeMs)}</span></div>
+          <div>Last trade <span style={{ color: C.text, fontWeight: 600 }}>{ago(hb.lastTradeAt)}</span></div>
+        </div>
+      </div>
+
+      {hb.consecutiveErrors > 0 && (
+        <div style={{ background: C.roseDim, border: `1px solid ${C.rose}30`, borderRadius: 10, padding: "10px 12px" }}>
+          <div style={{ fontSize: 11, color: C.rose, fontWeight: 600 }}>⚠ {hb.consecutiveErrors} consecutive errors</div>
+        </div>
+      )}
+
+      <Divider />
+
+      {/* SAGE */}
+      {sage && (
+        <div style={{ padding: "0 4px" }}>
+          <Label>SAGE Engine</Label>
+          <div style={{ fontSize: 11, color: C.textSec, lineHeight: 1.8 }}>
+            <div>Reflections <span style={{ color: C.text, fontWeight: 600 }}>{sage.reflectionCount ?? 0}</span></div>
+            <div>Outcomes <span style={{ color: C.text, fontWeight: 600 }}>{sage.outcomesRecorded ?? 0}</span></div>
+            <div>Rules <span style={{ color: C.text, fontWeight: 600 }}>{sage.playbookRules ?? 0}</span></div>
+          </div>
+          {sage.contextPrefix && (
+            <div style={{ marginTop: 8, fontSize: 10, color: C.textMut, lineHeight: 1.6, fontStyle: "italic", padding: "8px 10px", background: C.indigoDim, borderRadius: 8, border: `1px solid ${C.indigo}20` }}>
+              "{sage.contextPrefix}"
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ flex: 1 }} />
+
+      {/* Operator controls */}
+      <div style={{ padding: "0 4px 4px" }}>
+        <Label>Operator</Label>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {[
+            { label: "Pause", color: C.amber, endpoint: "/api/operator/pause" },
+            { label: "Resume", color: C.emerald, endpoint: "/api/operator/resume" },
+            { label: "Emergency Stop", color: C.rose, endpoint: "/api/operator/emergency-stop" },
+          ].map(({ label, color, endpoint }) => (
+            <button
+              key={label}
+              onClick={async () => { try { await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "dashboard", actor: "operator" }) }); } catch {} }}
+              style={{
+                padding: "8px 12px", borderRadius: 8, border: `1px solid ${color}30`,
+                background: color + "12", color, fontSize: 11, fontWeight: 600,
+                cursor: "pointer", fontFamily: "Inter,sans-serif", transition: "all 0.15s",
+              }}
+            >{label}</button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
 
-function KV({ k, v, c = T.fg, mono }) {
+// ── Top bar with live ticker ──────────────────────────────────────────────────
+function TopBar({ status }) {
+  const signals = status?.signals ?? [];
+  const items = status?.riskMetrics ? [
+    `BTC ${status.symbols?.includes("BTCUSD") ? "●" : ""}`,
+    ...signals.map(s => `${s.symbol}  ${s.direction?.toUpperCase()}  ${((s.confidence ?? 0) * 100).toFixed(0)}%`),
+    `Equity  ${usd(status.riskMetrics.equity ?? 0)}`,
+    `Positions  ${status.riskMetrics.openPositions ?? 0}`,
+    `Mode  ${(status.executionMode ?? "—").toUpperCase()}`,
+  ] : [];
+  const ticker = [...items, ...items].join("   ·   ");
+
   return (
-    <div style={{ display:"flex", justifyContent:"space-between", padding:"2.5px 0", fontSize:10.5 }}>
-      <span style={{ color:T.fg2 }}>{k}</span>
+    <div style={{
+      height: 44, borderBottom: `1px solid ${C.border}`,
+      display: "flex", alignItems: "center",
+      background: "rgba(0,0,0,0.3)", flexShrink: 0, overflow: "hidden",
+    }}>
+      <div style={{ padding: "0 20px", borderRight: `1px solid ${C.border}`, height: "100%", display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+        <Dot color={status?.halted ? C.rose : C.emerald} pulse />
+        <span style={{ fontSize: 11, fontWeight: 700, color: C.textSec, letterSpacing: "0.06em" }}>SENTINEL v3</span>
+      </div>
+      <div style={{ flex: 1, overflow: "hidden" }}>
+        <div style={{
+          display: "inline-block", whiteSpace: "nowrap",
+          fontSize: 11, color: C.textSec, fontWeight: 500,
+          animation: ticker.length > 10 ? "ticker 40s linear infinite" : "none",
+          paddingLeft: "100%",
+        }}>
+          {ticker}
+        </div>
+      </div>
+      <div style={{ padding: "0 16px", flexShrink: 0, display: "flex", gap: 8 }}>
+        {status?.testMode && <Pill color={C.amber}>TEST</Pill>}
+        <Pill color={C.indigo}>ERC-8004</Pill>
+      </div>
+    </div>
+  );
+}
+
+// ── Hero metric card ──────────────────────────────────────────────────────────
+function HeroCard({ label, value, sub, color = C.text, icon, style }) {
+  return (
+    <Card style={{ ...style }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <Label>{label}</Label>
+        {icon && <span style={{ fontSize: 18, opacity: 0.4 }}>{icon}</span>}
+      </div>
+      <div style={{ fontSize: 28, fontWeight: 800, color, letterSpacing: "-0.02em", lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ marginTop: 6, fontSize: 11, color: C.textSec, fontWeight: 500 }}>{sub}</div>}
+    </Card>
+  );
+}
+
+// ── Live signals feed ─────────────────────────────────────────────────────────
+function SignalsFeed({ status }) {
+  const signals = status?.signals ?? [];
+  const evals   = status?.strategyEvaluations ?? {}; // now a Record<symbol, evaluations[]>
+  const [selectedSym, setSelectedSym] = useState(null);
+
+  // Pick symbol to show scores for: selected, or first with a signal, or first available
+  const evalSymbols = Object.keys(evals);
+  const activeSymbol = selectedSym && evals[selectedSym]
+    ? selectedSym
+    : signals[0]?.symbol && evals[signals[0].symbol]
+      ? signals[0].symbol
+      : evalSymbols[0] ?? null;
+
+  return (
+    <Card style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div>
+          <Label style={{ marginBottom: 2 }}>Live Signals</Label>
+          <div style={{ fontSize: 11, color: C.textMut }}>Fired this cycle</div>
+        </div>
+        <Pill color={signals.length > 0 ? C.emerald : C.textMut}>{signals.length} active</Pill>
+      </div>
+
+      {signals.length === 0 ? (
+        <div style={{ padding: "24px 0", textAlign: "center", color: C.textMut, fontSize: 12 }}>
+          No strategies fired this cycle
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {signals.map((s, i) => {
+            const col = buyColor(s.direction);
+            const conf = (s.confidence ?? 0) * 100;
+            return (
+              <div key={i} style={{
+                padding: "12px 14px", borderRadius: 12,
+                background: col + "0d", border: `1px solid ${col}25`,
+                animation: "fadeIn 0.3s ease",
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <Dot color={col} pulse />
+                    <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{s.symbol}</span>
+                    <Pill color={col} style={{ fontSize: 10 }}>{(s.direction ?? "HOLD").toUpperCase()}</Pill>
+                  </div>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: col }}>{num(conf, 0)}%</span>
+                </div>
+                <div style={{ marginBottom: 4 }}>
+                  <Bar value={s.confidence ?? 0} color={col} height={3} />
+                </div>
+                <div style={{ fontSize: 10, color: C.textSec, fontWeight: 500 }}>
+                  {(s.strategy ?? "—").replace(/_/g, " ").toUpperCase()}
+                </div>
+                {s.reasoning && (
+                  <div style={{ marginTop: 6, fontSize: 10, color: C.textMut, lineHeight: 1.5 }}>
+                    {s.reasoning.length > 110 ? s.reasoning.slice(0, 110) + "…" : s.reasoning}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Strategy scores — symbol picker */}
+      {evalSymbols.length > 0 && (
+        <>
+          <Divider />
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <Label style={{ marginBottom: 0 }}>Strategy Scores</Label>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+              {evalSymbols.map(sym => (
+                <button key={sym} onClick={() => setSelectedSym(sym)} style={{
+                  padding: "2px 8px", borderRadius: 6, fontSize: 9, fontWeight: 600,
+                  background: sym === activeSymbol ? C.indigoDim : "transparent",
+                  border: `1px solid ${sym === activeSymbol ? C.indigo : C.border}`,
+                  color: sym === activeSymbol ? C.indigo : C.textMut,
+                  cursor: "pointer", fontFamily: "Inter,sans-serif",
+                }}>{sym.replace("USD","")}</button>
+              ))}
+            </div>
+          </div>
+          {activeSymbol && (evals[activeSymbol] ?? []).map((e, i) => {
+            const conf = (e.confidence ?? 0) * 100;
+            const col  = conf > 60 ? C.emerald : conf > 40 ? C.amber : C.textMut;
+            return (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                <div style={{ width: 76, fontSize: 10, color: C.textSec, fontWeight: 500, flexShrink: 0 }}>
+                  {e.name.replace(/_/g, " ")}
+                </div>
+                <div style={{ flex: 1 }}><Bar value={e.confidence ?? 0} color={col} height={6} /></div>
+                <div style={{ width: 32, fontSize: 11, fontWeight: 700, color: col, textAlign: "right" }}>
+                  {num(conf, 0)}%
+                </div>
+                <Pill color={e.signal !== "hold" ? buyColor(e.signal) : C.textMut} style={{ fontSize: 9, padding: "2px 6px" }}>
+                  {(e.signal ?? "hold").toUpperCase()}
+                </Pill>
+              </div>
+            );
+          })}
+        </>
+      )}
+    </Card>
+  );
+}
+
+// ── AI Narrative ──────────────────────────────────────────────────────────────
+function NarrativeCard({ status }) {
+  const n = status?.narrative;
+  const sourceColor = { claude: C.violet, groq: C.sky, template: C.textMut };
+  return (
+    <Card style={{ display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <Label style={{ marginBottom: 0 }}>AI Reasoning</Label>
+        {n && <Pill color={sourceColor[n.source] ?? C.textMut} style={{ fontSize: 10 }}>{(n.source ?? "—").toUpperCase()}</Pill>}
+      </div>
+      {n ? (
+        <>
+          <div style={{ fontSize: 11, color: C.textSec, marginBottom: 10 }}>
+            <span style={{ fontWeight: 600, color: C.text }}>{n.symbol}</span>
+            {" · "}
+            {n.timestamp ? new Date(n.timestamp).toLocaleTimeString() : "—"}
+          </div>
+          <div style={{
+            fontSize: 13, color: C.text, lineHeight: 1.8, fontWeight: 400,
+            padding: "14px 16px", background: C.indigoDim,
+            borderRadius: 10, border: `1px solid ${C.indigo}20`,
+            flex: 1,
+          }}>
+            {n.narrative}
+          </div>
+        </>
+      ) : (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: C.textMut, gap: 8, padding: "24px 0" }}>
+          <div style={{ fontSize: 28, opacity: 0.3 }}>🤖</div>
+          <div style={{ fontSize: 12 }}>Awaiting first trade…</div>
+          <div style={{ fontSize: 10, color: C.textMut }}>Claude → Groq → Template</div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── Sentiment card ────────────────────────────────────────────────────────────
+function SentimentCard({ status }) {
+  const s   = status?.sentiment;
+  const val = s?.composite ?? 0;
+  const col = val > 0.1 ? C.emerald : val < -0.1 ? C.rose : C.amber;
+  const lbl = val > 0.3 ? "BULLISH" : val > 0.1 ? "MILD BULL" : val < -0.3 ? "BEARISH" : val < -0.1 ? "MILD BEAR" : "NEUTRAL";
+  const normalized = (val + 1) / 2;
+
+  return (
+    <Card>
+      <Label>Market Sentiment</Label>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+        <div style={{ fontSize: 28, fontWeight: 800, color: col }}>{num(val > 0 ? val : val, 2)}</div>
+        <Pill color={col}>{lbl}</Pill>
+      </div>
+      <div style={{ marginBottom: 8 }}>
+        <Bar value={normalized} color={col} height={8} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.textMut }}>
+        <span>FEAR</span><span>NEUTRAL</span><span>GREED</span>
+      </div>
+      {s?.sources && (
+        <div style={{ marginTop: 12, display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {s.sources.map(src => <Pill key={src} color={C.textMut} style={{ fontSize: 9 }}>{src.replace(/_/g, " ")}</Pill>)}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── Positions table ───────────────────────────────────────────────────────────
+function PositionsTable({ status }) {
+  const positions = status?.positions ?? [];
+  const thStyle = { padding: "10px 12px", fontSize: 10, fontWeight: 600, color: C.textMut, textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left", borderBottom: `1px solid ${C.border}` };
+  const tdStyle = { padding: "12px", fontSize: 12, borderBottom: `1px solid ${C.border}40`, color: C.text };
+
+  return (
+    <Card style={{ padding: 0 }}>
+      <div style={{ padding: "16px 20px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <Label style={{ marginBottom: 2 }}>Open Positions</Label>
+          <div style={{ fontSize: 11, color: C.textMut }}>{positions.length} active</div>
+        </div>
+        <Pill color={positions.length > 0 ? C.indigo : C.textMut}>{positions.length} / {status?.maxPositions ?? 5}</Pill>
+      </div>
+      {positions.length === 0 ? (
+        <div style={{ padding: "32px 20px", textAlign: "center", color: C.textMut, fontSize: 12 }}>No open positions</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {["Symbol", "Side", "Size", "Entry", "Stop", "Target", "Strategy", "Opened"].map(h => (
+                  <th key={h} style={thStyle}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map(p => {
+                const col = p.side === "buy" ? C.emerald : C.rose;
+                return (
+                  <tr key={p.id} style={{ transition: "background 0.15s" }}>
+                    <td style={{ ...tdStyle, fontWeight: 700 }}>{p.symbol}</td>
+                    <td style={tdStyle}><Pill color={col} style={{ fontSize: 10 }}>{(p.side ?? "—").toUpperCase()}</Pill></td>
+                    <td style={{ ...tdStyle, fontWeight: 600 }}>{num(p.size, 6)}</td>
+                    <td style={tdStyle}>{usd(p.entryPrice)}</td>
+                    <td style={{ ...tdStyle, color: C.rose }}>{p.stopLoss ? usd(p.stopLoss) : "—"}</td>
+                    <td style={{ ...tdStyle, color: C.emerald }}>{p.takeProfit ? usd(p.takeProfit) : "—"}</td>
+                    <td style={{ ...tdStyle, color: C.textSec, fontSize: 11 }}>{(p.strategy ?? "—").replace(/_/g, " ")}</td>
+                    <td style={{ ...tdStyle, color: C.textMut, fontSize: 11 }}>{ago(p.openedAt)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── Governance pipeline ───────────────────────────────────────────────────────
+function GovernancePipeline({ status, checks }) {
+  const stages = ["Oracle", "Signal", "Sentiment", "Risk Gate", "Execute", "Record"];
+  const hasActive = (status?.signals ?? []).length > 0;
+  const lastCp = (checks?.checkpoints ?? []).find(cp => cp?.eventType);
+  const lastEvt = lastCp?.eventType;
+  // Map last checkpoint event → how many stages completed
+  const stagesDone = status?.halted ? 0
+    : lastEvt === "close"      ? 6
+    : lastEvt === "trade"      ? 5
+    : lastEvt === "veto"       ? 3  // risk gate blocked it
+    : lastEvt === "heartbeat"  ? 3  // oracle+signal+sentiment running
+    : hasActive                ? 4  // signal found, executing
+    : 2;                            // baseline: oracle+signal alive
+
+  return (
+    <Card>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <Label style={{ marginBottom: 0 }}>Governance Pipeline</Label>
+        <Pill color={C.indigo}>6-stage ERC-8004</Pill>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 0 }}>
+        {stages.map((s, i) => {
+          const done   = i < stagesDone;
+          const active = i === stagesDone;
+          const col    = done ? C.emerald : active ? C.amber : C.textMut;
+          return (
+            <React.Fragment key={s}>
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                <div style={{
+                  width: 32, height: 32, borderRadius: "50%",
+                  background: done ? C.emeraldDim : active ? C.amberDim : "rgba(255,255,255,0.04)",
+                  border: `2px solid ${col}`,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 11, fontWeight: 700, color: col,
+                  transition: "all 0.3s",
+                }}>
+                  {done ? "✓" : i + 1}
+                </div>
+                <div style={{ fontSize: 9, fontWeight: 600, color: col, textAlign: "center", letterSpacing: "0.04em", whiteSpace: "nowrap" }}>{s.toUpperCase()}</div>
+              </div>
+              {i < stages.length - 1 && (
+                <div style={{ flex: 1, height: 2, background: i < stagesDone ? C.emerald : C.border, transition: "background 0.3s", maxWidth: 40 }} />
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+      <div style={{ marginTop: 12, display: "flex", gap: 16, fontSize: 10, color: C.textSec }}>
+        <span><span style={{ color: C.emerald }}>■</span> Passed ({stagesDone})</span>
+        {hasActive && <span><span style={{ color: C.amber }}>■</span> Active</span>}
+        <span style={{ marginLeft: "auto", color: C.textMut }}>Every trade passes all 6 gates</span>
+      </div>
+    </Card>
+  );
+}
+
+// ── Trade history ─────────────────────────────────────────────────────────────
+function TradeHistory({ trades }) {
+  const closed = (trades?.trades ?? []).slice(0, 20);
+  const stats  = trades?.stats ?? {};
+  const thStyle = { padding: "10px 12px", fontSize: 10, fontWeight: 600, color: C.textMut, textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left", borderBottom: `1px solid ${C.border}` };
+  const tdStyle = { padding: "11px 12px", fontSize: 12, borderBottom: `1px solid ${C.border}30` };
+
+  return (
+    <Card style={{ padding: 0 }}>
+      <div style={{ padding: "16px 20px 12px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div>
+          <Label style={{ marginBottom: 2 }}>Trade History</Label>
+          <div style={{ fontSize: 11, color: C.textMut }}>{stats.total ?? 0} closed trades</div>
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: C.emerald }}>{stats.wins ?? 0}</div>
+            <div style={{ fontSize: 9, color: C.textMut }}>WINS</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: C.rose }}>{stats.losses ?? 0}</div>
+            <div style={{ fontSize: 9, color: C.textMut }}>LOSSES</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: C.indigo }}>{stats.total > 0 ? pct(stats.winRate ?? 0, 0) : "—"}</div>
+            <div style={{ fontSize: 9, color: C.textMut }}>WIN RATE</div>
+          </div>
+        </div>
+      </div>
+      {closed.length === 0 ? (
+        <div style={{ padding: "32px 20px", textAlign: "center", color: C.textMut, fontSize: 12 }}>No closed trades yet</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>{["Symbol","Side","Entry","Exit","P&L","P&L %","Strategy","Reason","Duration"].map(h => <th key={h} style={thStyle}>{h}</th>)}</tr>
+            </thead>
+            <tbody>
+              {closed.map((t, i) => {
+                const win = t.pnl >= 0;
+                const col = win ? C.emerald : C.rose;
+                const dur = t.durationMs ? `${Math.round(t.durationMs / 60000)}m` : "—";
+                return (
+                  <tr key={i} style={{ background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
+                    <td style={{ ...tdStyle, fontWeight: 700, color: C.text }}>{t.symbol}</td>
+                    <td style={tdStyle}><Pill color={buyColor(t.direction)} style={{ fontSize: 10 }}>{(t.direction ?? "—").toUpperCase()}</Pill></td>
+                    <td style={tdStyle}>{usd(t.entryPrice)}</td>
+                    <td style={tdStyle}>{usd(t.exitPrice)}</td>
+                    <td style={{ ...tdStyle, color: col, fontWeight: 700 }}>{win ? "+" : ""}{usd(t.pnl)}</td>
+                    <td style={{ ...tdStyle, color: col, fontWeight: 600 }}>{win ? "+" : ""}{pct(t.pnlPct ?? 0)}</td>
+                    <td style={{ ...tdStyle, color: C.textSec, fontSize: 11 }}>{(t.strategy ?? "—").replace(/_/g, " ")}</td>
+                    <td style={tdStyle}><Pill color={C.textMut} style={{ fontSize: 9 }}>{t.exitReason ?? "—"}</Pill></td>
+                    <td style={{ ...tdStyle, color: C.textMut, fontSize: 11 }}>{dur}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── Checkpoint log ────────────────────────────────────────────────────────────
+function CheckpointLog({ checks }) {
+  const cps = checks?.checkpoints ?? [];
+  const stats = checks?.stats ?? {};
+  const integrity = checks?.integrity ?? {};
+  const evtColor = e => ({ trade: C.emerald, halt: C.rose, veto: C.amber, close: C.sky, heartbeat: C.textMut }[e] ?? C.textMut);
+
+  return (
+    <Card style={{ padding: 0 }}>
+      <div style={{ padding: "16px 20px 12px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div>
+          <Label style={{ marginBottom: 2 }}>Decision Log</Label>
+          <div style={{ fontSize: 11, color: C.textMut }}>{stats.total ?? 0} checkpoints · chain {integrity.valid ? "✓ valid" : "⚠ invalid"}</div>
+        </div>
+        <Pill color={integrity.valid ? C.emerald : C.rose}>{integrity.valid ? "CHAIN VALID" : "CHAIN ERROR"}</Pill>
+      </div>
+      <div style={{ overflowY: "auto", maxHeight: 280 }}>
+        {cps.map((cp, i) => {
+          const col = evtColor(cp.eventType);
+          return (
+            <div key={i} style={{
+              display: "flex", alignItems: "flex-start", gap: 10,
+              padding: "10px 20px", borderBottom: `1px solid ${C.border}30`,
+              transition: "background 0.15s",
+            }}>
+              <div style={{ marginTop: 2, flexShrink: 0 }}>
+                <Dot color={col} />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                  <Pill color={col} style={{ fontSize: 9, padding: "1px 6px" }}>{(cp.eventType ?? "—").toUpperCase()}</Pill>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: C.text }}>{cp.symbol}</span>
+                  <span style={{ fontSize: 10, color: C.textMut, marginLeft: "auto", flexShrink: 0 }}>
+                    #{cp.id}
+                  </span>
+                </div>
+                <div style={{ fontSize: 10, color: C.textMut, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {cp.hash?.slice(0, 32)}…
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+// ── Governance stats ──────────────────────────────────────────────────────────
+function GovernanceStats({ status }) {
+  const g = status?.governance ?? {};
+  const stats = [
+    { label: "Total Signals", value: g.totalSignals ?? 0, color: C.indigo },
+    { label: "Vetoed Trades", value: g.vetoedTrades ?? 0, color: C.amber },
+    { label: "Mandate Violations", value: g.mandateViolations ?? 0, color: g.mandateViolations > 0 ? C.rose : C.textSec },
+    { label: "IPFS Pinned", value: g.ipfsPinnedCount ?? 0, color: C.sky },
+  ];
+  return (
+    <Card>
+      <Label>Governance Stats</Label>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        {stats.map(({ label, value, color }) => (
+          <div key={label} style={{ padding: "10px 12px", borderRadius: 10, background: color + "0d", border: `1px solid ${color}20` }}>
+            <div style={{ fontSize: 18, fontWeight: 800, color }}>{value}</div>
+            <div style={{ fontSize: 10, color: C.textMut, marginTop: 2 }}>{label}</div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+// ── Log stream ────────────────────────────────────────────────────────────────
+function LogStream({ logs }) {
+  const ref = useRef(null);
+  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [logs]);
+
+  const LC = { ERROR: C.rose, WARN: C.amber, INFO: C.sky, DEBUG: C.textMut };
+  const levelCol  = lvl => LC[(lvl ?? "").toUpperCase()] ?? C.textMut;
+  const levelBadge = lvl => {
+    const upper = (lvl ?? "").toUpperCase();
+    const col = LC[upper] ?? C.textMut;
+    return (
       <span style={{
-        color:c, fontWeight:500, textAlign:"right",
-        maxWidth:"62%", overflow:"hidden", textOverflow:"ellipsis",
-        whiteSpace:"nowrap", fontFamily: mono ? "monospace" : undefined,
-      }}>{v}</span>
-    </div>
-  );
-}
-
-function Metric({ label, value, sub, color = T.fg }) {
-  return (
-    <div style={{ padding:"6px 10px" }}>
-      <div style={{ fontSize:8, color:T.fg3, textTransform:"uppercase", letterSpacing:1, marginBottom:3 }}>{label}</div>
-      <div style={{ fontSize:15, fontWeight:700, color, lineHeight:1, fontVariantNumeric:"tabular-nums" }}>{value}</div>
-      {sub && <div style={{ fontSize:9, color:T.fg2, marginTop:3 }}>{sub}</div>}
-    </div>
-  );
-}
-
-/* ── Error boundary ────────────────────────────────────────────────────────── */
-class ErrorBoundary extends React.Component {
-  constructor(p) { super(p); this.state = { err:null }; }
-  static getDerivedStateFromError(e) { return { err:e }; }
-  render() {
-    if (this.state.err) return (
-      <div style={{ minHeight:"100vh", background:T.bg, color:T.dn, padding:40, fontFamily:"monospace" }}>
-        <h2 style={{ color:T.w, marginBottom:12 }}>Dashboard Error</h2>
-        <pre style={{ fontSize:12, whiteSpace:"pre-wrap", color:T.warn }}>{String(this.state.err)}</pre>
-        <button onClick={()=>this.setState({err:null})} style={{
-          marginTop:16, padding:"8px 20px", background:`${T.up}20`,
-          color:T.up, border:`1px solid ${T.up}40`, borderRadius:4, cursor:"pointer", fontFamily:"monospace",
-        }}>Retry</button>
-      </div>
+        display: "inline-block", width: 38, textAlign: "center",
+        padding: "1px 0", borderRadius: 3, fontSize: 9, fontWeight: 700,
+        background: col + "18", color: col, flexShrink: 0, letterSpacing: "0.04em",
+      }}>{upper || "LOG"}</span>
     );
-    return this.props.children;
-  }
-}
-
-export default function SentinelWrapper() { return <ErrorBoundary><Sentinel /></ErrorBoundary>; }
-
-/* ════════════════════════════════════════════════════════════════════════════
-   MAIN COMPONENT
-   ════════════════════════════════════════════════════════════════════════════ */
-function Sentinel() {
-  const [status,      setStatus]      = useState(null);
-  const [risk,        setRisk]        = useState(null);
-  const [trust,       setTrust]       = useState(null);
-  const [checkpoints, setCheckpoints] = useState({ checkpoints:[], stats:{}, integrity:{} });
-  const [positions,   setPositions]   = useState([]);
-  const [trades,      setTrades]      = useState({ trades:[], stats:{} });
-  const [sage,        setSage]        = useState(null);
-  const [logs,        setLogs]        = useState([]);
-  const [opState,     setOpState]     = useState("ACTIVE");
-  const [opLog,       setOpLog]       = useState([]);
-  const [equityHist,  setEquityHist]  = useState([10000]);
-  const [online,      setOnline]      = useState(true);
-  const [lastUpdate,  setLastUpdate]  = useState(null);
-  const [selCpIdx,    setSelCpIdx]    = useState(0);
-
-  const fetchAll = useCallback(async () => {
-    try {
-      const [s, r, tr, cp, pos, td, sg, lg, opS, opA] = await Promise.all([
-        fetch("/api/status").then(x=>x.json()),
-        fetch("/api/risk").then(x=>x.json()),
-        fetch("/api/trust").then(x=>x.json()),
-        fetch("/api/checkpoints?limit=20").then(x=>x.json()),
-        fetch("/api/positions").then(x=>x.json()),
-        fetch("/api/trades?limit=30").then(x=>x.json()),
-        fetch("/api/sage").then(x=>x.json()),
-        fetch("/api/logs?limit=80").then(x=>x.json()),
-        fetch("/api/operator/state").then(x=>x.json()).catch(()=>null),
-        fetch("/api/operator/actions?limit=8").then(x=>x.json()).catch(()=>null),
-      ]);
-      setStatus(s); setRisk(r); setTrust(tr);
-      setCheckpoints(cp); setPositions(pos); setTrades(td);
-      setSage(sg); setLogs(lg);
-      setOnline(true);
-      setLastUpdate(new Date());
-      if (r?.equity) setEquityHist(h => [...h.slice(-79), r.equity]);
-      if (opS) {
-        const m = { normal:"ACTIVE", paused:"PAUSED", emergency_stop:"EMERGENCY_STOP" };
-        setOpState(m[opS.mode] || "ACTIVE");
-      }
-      if (opA?.actions) setOpLog(opA.actions.slice(0,8).map(a => ({
-        ts: a.timestamp ? new Date(a.timestamp).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "—",
-        action: a.action || "—",
-        reason: a.reason || "—",
-      })));
-    } catch {
-      setOnline(false);
-    }
-  }, []);
-
-  useEffect(() => { fetchAll(); const id = setInterval(fetchAll, 4000); return ()=>clearInterval(id); }, [fetchAll]);
-
-  /* ── Operator actions ── */
-  const opPost = async (endpoint, reason) => {
-    try {
-      const res = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ reason, actor:"dashboard" }) });
-      const data = await res.json();
-      if (data.state) {
-        const m = { normal:"ACTIVE", paused:"PAUSED", emergency_stop:"EMERGENCY_STOP" };
-        setOpState(m[data.state.mode] || "ACTIVE");
-      }
-    } catch {}
   };
 
-  /* ── Derived values ── */
-  const eq      = risk?.equity    ?? 10000;
-  const dpnl    = risk?.dailyPnl  ?? 0;
-  const dd      = (risk?.drawdown ?? 0) * 100;
-  const openPos = risk?.openPositions ?? 0;
-  const cycle   = status?.cycle   ?? 0;
-  const halted  = status?.halted  ?? false;
-  const mode    = status?.executionMode ?? "paper";
-  const testMode = status?.testMode ?? false;
-  const operatorMode = status?.operatorMode ?? "normal";
-  const signals = status?.signals ?? [];
-  const gov     = status?.governance ?? {};
-  const hb      = status?.heartbeat ?? {};
-  const narrative = status?.narrative ?? null;
-  const sentiment = status?.sentiment ?? null;
-  const strategyEvals = status?.strategyEvaluations ?? null;
-
-  const tier    = trust?.tier ?? "probation";
-  const tScore  = (trust?.overall ?? 0) * 100;
-  const tSize   = (trust?.sizeFactor ?? 0) * 100;
-  const dims    = trust?.dimensions ?? {};
-
-  const pnlPct  = ((eq - 10000) / 10000) * 100;
-  const cpList  = checkpoints.checkpoints ?? [];
-  const cpStats = checkpoints.stats ?? {};
-  const intact  = checkpoints.integrity?.valid ?? true;
-  const tradeList = trades.trades ?? [];
-  const trStats   = trades.stats  ?? {};
-
-  const { stagesDone, hasActiveStage } = useMemo(() => {
-    if (!cpList.length) return { stagesDone: 0, hasActiveStage: false };
-    const last = cpList[0];
-    if (last.eventType === "trade")     return { stagesDone: 6, hasActiveStage: false };
-    if (last.eventType === "close")     return { stagesDone: 6, hasActiveStage: false };
-    if (last.eventType === "heartbeat") return { stagesDone: 2, hasActiveStage: true  };
-    if (last.eventType === "veto")      return { stagesDone: 4, hasActiveStage: true  };
-    if (last.eventType === "halt")      return { stagesDone: 4, hasActiveStage: true  };
-    // "signal" = HOLD — completed Oracle+Signal, stopped there
-    return { stagesDone: 2, hasActiveStage: false };
-  }, [cpList]);
-
-  const lastCycleMs = hb.lastCycleAt ? Date.now() - new Date(hb.lastCycleAt).getTime() : null;
-  const lastTradeMs = hb.lastTradeAt ? Date.now() - new Date(hb.lastTradeAt).getTime() : null;
-  const cycleStale  = lastCycleMs != null && lastCycleMs > 120_000;
-  const hasError    = (hb.consecutiveErrors ?? 0) > 0;
-  const isRunning   = online && !halted && operatorMode === "normal";
-  const hbColor     = !online ? T.dn : (cycleStale || hasError) ? T.warn : T.up;
-  const hbLabel     = !online ? "OFFLINE" : cycleStale ? "STALE" : hasError ? "ERRORS" : "RUNNING";
-
-  const btn = (color, disabled) => ({
-    background: disabled ? `${T.fg3}10` : `${color}18`,
-    color: disabled ? T.fg3 : color,
-    border: `1px solid ${disabled ? T.brd : `${color}40`}`,
-    borderRadius:4, padding:"6px 14px", fontSize:10, fontWeight:700,
-    fontFamily:F, cursor: disabled ? "not-allowed" : "pointer",
-  });
-
   return (
-    <div style={{ background:T.bg, minHeight:"100vh", fontFamily:F, fontSize:11, lineHeight:1.4, color:T.fg }}>
-
-      {/* ── Global styles ── */}
-      <style>{`
-        *{margin:0;padding:0;box-sizing:border-box}
-        body{background:${T.bg}}
-        ::-webkit-scrollbar{width:4px;height:4px}
-        ::-webkit-scrollbar-thumb{background:${T.brd};border-radius:2px}
-        button:hover{opacity:.8}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-        @media(max-width:900px){
-          .main-grid{grid-template-columns:1fr 1fr !important}
-          .col4{grid-column:1/-1 !important}
-          .col3{grid-template-columns:1fr 1fr !important}
-        }
-        @media(max-width:600px){
-          .main-grid{grid-template-columns:1fr !important}
-          .col3{grid-template-columns:1fr !important}
-          .statusbar-right{display:none !important}
-        }
-      `}</style>
-
-      {/* ══════════════════════════════════════════════════════════════════════
-          1. STATUS BAR
-          ══════════════════════════════════════════════════════════════════════ */}
-      <header style={{
-        background:T.s2, borderBottom:`1px solid ${T.brd}`,
-        padding:"0 16px", height:42, display:"flex", alignItems:"center", gap:12, flexWrap:"wrap",
-      }}>
-        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-          <div style={{
-            width:22, height:22, borderRadius:4,
-            background:`linear-gradient(135deg, ${T.up}, ${T.cyan})`,
-            display:"flex", alignItems:"center", justifyContent:"center",
-            fontSize:11, fontWeight:800, color:T.bg,
-          }}>S</div>
-          <span style={{ fontSize:13, fontWeight:800, color:T.w, letterSpacing:2 }}>SENTINEL v3</span>
-          <span style={{ fontSize:8, color:T.fg3, letterSpacing:1.5 }}>ERC-8004 · SMC · Sepolia</span>
+    <Card style={{ padding: 0 }}>
+      <div style={{ padding: "16px 20px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <Label style={{ marginBottom: 0 }}>System Logs</Label>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {["ERROR","WARN","INFO"].map(lvl => {
+            const count = logs.filter(l => (l.level ?? "").toUpperCase() === lvl).length;
+            return count > 0 ? <Pill key={lvl} color={LC[lvl]} style={{ fontSize: 9, padding: "2px 7px" }}>{lvl} {count}</Pill> : null;
+          })}
+          <Pill color={C.textMut}>{logs.length} lines</Pill>
         </div>
-        <div style={{ display:"flex", gap:6 }}>
-          <Badge color={online ? T.up : T.dn}>{online ? "ONLINE" : "OFFLINE"}</Badge>
-          <Badge color={T.info}>{mode.toUpperCase()}</Badge>
-          {testMode && <Badge color={T.warn}>TEST MODE</Badge>}
-          {halted && <Badge color={T.dn}>HALTED</Badge>}
-          {operatorMode !== "normal" && <Badge color={operatorMode === "emergency_stop" ? T.dn : T.warn}>{operatorMode.toUpperCase().replace("_"," ")}</Badge>}
-          <Badge color={tierColor(tier)}>{tier.toUpperCase()}</Badge>
-        </div>
-        <div className="statusbar-right" style={{ marginLeft:"auto", display:"flex", gap:16, alignItems:"center", fontSize:10 }}>
-          <span style={{ color:T.fg3 }}>CYCLE <span style={{ color:T.fg }}>{cycle}</span></span>
-          <span style={{ color:T.fg3 }}>POS <span style={{ color:openPos>0?T.up:T.fg }}>{openPos}</span></span>
-          <span style={{ color:T.fg3 }}>CP <span style={{ color:T.fg }}>{cpStats.total ?? 0}</span></span>
-          <span style={{ color:T.fg3 }}>TRUST <span style={{ color:truC(tScore) }}>{fmt(tScore,0)}</span></span>
-          <span style={{ color:T.fg3 }}>{lastUpdate ? lastUpdate.toLocaleTimeString() : "—"}</span>
-        </div>
-      </header>
-
-      {/* ══════════════════════════════════════════════════════════════════════
-          2. HEARTBEAT BANNER
-          ══════════════════════════════════════════════════════════════════════ */}
-      <div style={{
-        display:"flex", alignItems:"center", gap:14, padding:"5px 16px",
-        borderBottom:`1px solid ${T.brd}`, background:`${hbColor}08`, fontSize:10,
-        flexWrap:"wrap",
-      }}>
-        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-          <span style={{
-            display:"inline-block", width:8, height:8, borderRadius:"50%",
-            background:hbColor, boxShadow:`0 0 8px ${hbColor}60`,
-            animation: isRunning && !cycleStale ? "pulse 2s infinite" : "none",
-          }} />
-          <span style={{ fontWeight:800, color:hbColor, letterSpacing:1 }}>{hbLabel}</span>
-        </div>
-        <span style={{ color:T.fg3 }}>|</span>
-        <span style={{ color:T.fg2 }}>Last Cycle:</span>
-        <span style={{ color:cycleStale?T.warn:T.fg, fontWeight:600 }}>{ago(lastCycleMs)}</span>
-        <span style={{ color:T.fg3 }}>|</span>
-        <span style={{ color:T.fg2 }}>Last Trade:</span>
-        <span style={{ color:lastTradeMs==null?T.warn:T.fg, fontWeight:600 }}>{ago(lastTradeMs)}</span>
-        <span style={{ color:T.fg3 }}>|</span>
-        <span style={{ color:T.fg2 }}>Uptime:</span>
-        <span style={{ color:T.fg, fontWeight:600 }}>{hb.uptimeMs ? uptime(hb.uptimeMs) : "—"}</span>
-        <span style={{ color:T.fg3 }}>|</span>
-        <span style={{ color:T.fg2 }}>Cycles:</span>
-        <span style={{ color:T.fg, fontWeight:600 }}>{cycle}</span>
-        {hasError && (
-          <>
-            <span style={{ color:T.fg3 }}>|</span>
-            <span style={{ color:T.dn, fontWeight:700 }}>{hb.consecutiveErrors} err</span>
-          </>
+      </div>
+      <div ref={ref} style={{ overflowY: "auto", maxHeight: 260, overflowX: "hidden" }}>
+        {logs.slice(-60).map((l, i) => {
+          // Support both {time,level,logger,msg} and legacy {timestamp,level,module,message}
+          const ts  = l.time ?? l.timestamp ?? "";
+          const lvl = (l.level ?? "INFO").toUpperCase();
+          const mod = l.logger ?? l.module ?? "";
+          const msg = l.msg ?? l.message ?? "";
+          return (
+            <div key={i} style={{
+              display: "flex", alignItems: "flex-start", gap: 8,
+              padding: "5px 16px", fontSize: 11,
+              borderBottom: `1px solid ${C.border}20`,
+              fontFamily: "'Fira Code','Consolas','Monaco',monospace",
+              background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.012)",
+            }}>
+              <span style={{ color: C.textMut, flexShrink: 0, fontSize: 10, paddingTop: 1, whiteSpace: "nowrap" }}>
+                {ts ? ts.slice(11, 19) : "—"}
+              </span>
+              {levelBadge(lvl)}
+              <span style={{
+                color: C.indigo, flexShrink: 0, fontSize: 10,
+                width: 68, overflow: "hidden", textOverflow: "ellipsis",
+                whiteSpace: "nowrap", paddingTop: 1,
+              }}>{mod}</span>
+              <span style={{
+                color: lvl === "ERROR" ? C.rose : lvl === "WARN" ? C.amber : C.text,
+                flex: 1, minWidth: 0, lineHeight: 1.5,
+                wordBreak: "break-word", fontSize: 11,
+              }}>{msg}</span>
+            </div>
+          );
+        })}
+        {logs.length === 0 && (
+          <div style={{ padding: "24px 20px", color: C.textMut, fontSize: 11, textAlign: "center" }}>
+            Waiting for log entries…
+          </div>
         )}
       </div>
+    </Card>
+  );
+}
 
-      {/* ══════════════════════════════════════════════════════════════════════
-          3. MAIN GRID
-          ══════════════════════════════════════════════════════════════════════ */}
-      <div style={{ padding:"10px 12px 30px" }}>
+// ── Root app ──────────────────────────────────────────────────────────────────
+export default function App() {
+  const { status, trades, sage, logs, checks } = useData();
+  const metrics = status?.riskMetrics ?? {};
+  const hb      = status?.heartbeat ?? {};
+  const tStats  = trades?.stats ?? {};
 
-        {/* ── Row 1: Portfolio · Signals · Sentiment · Trust ── */}
-        <div className="main-grid" style={{
-          display:"grid",
-          gridTemplateColumns:"220px 1fr 220px 220px",
-          gap:10, marginBottom:10,
-        }}>
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: C.bg, color: C.text, fontFamily: "Inter,system-ui,sans-serif" }}>
+      <TopBar status={status} />
 
-          {/* Portfolio */}
-          <Panel title="Portfolio" tag={`#${status?.agentId ?? "—"}`}>
-            <div style={{ textAlign:"center", padding:"8px 0 4px" }}>
-              <div style={{ fontSize:22, fontWeight:700, color:eq>=10000?T.up:T.dn, fontVariantNumeric:"tabular-nums" }}>
-                {usd(eq)}
-              </div>
-              <div style={{ fontSize:10, color:T.fg2, marginTop:2 }}>
-                {pnlPct>=0?"+":""}{fmt(pnlPct)}% all time
-              </div>
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        <Sidebar status={status} trades={trades} sage={sage} checks={checks} />
+
+        {/* Main scroll area */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px", display: "flex", flexDirection: "column", gap: 16 }}>
+
+          {/* Hero metrics row */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
+            <HeroCard
+              label="Open Positions"
+              value={metrics.openPositions ?? 0}
+              sub={`of ${status?.maxPositions ?? 5} max`}
+              color={C.indigo}
+              icon="📊"
+            />
+            <HeroCard
+              label="Win Rate"
+              value={tStats.total > 0 ? pct(tStats.winRate ?? 0, 0) : "—"}
+              sub={`${tStats.wins ?? 0}W · ${tStats.losses ?? 0}L`}
+              color={(tStats.winRate ?? 0) >= 0.5 ? C.emerald : C.rose}
+              icon="🏆"
+            />
+            <HeroCard
+              label="Drawdown"
+              value={pct(metrics.drawdown ?? 0)}
+              sub="from peak equity"
+              color={(metrics.drawdown ?? 0) > 0.05 ? C.rose : (metrics.drawdown ?? 0) > 0.02 ? C.amber : C.emerald}
+              icon="📉"
+            />
+            <HeroCard
+              label="Uptime"
+              value={uptime(hb.uptimeMs)}
+              sub={`cycle #${status?.cycle ?? "—"}`}
+              color={C.sky}
+              icon="⏱"
+            />
+          </div>
+
+          {/* Signals + Narrative row */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <SignalsFeed status={status} />
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              <NarrativeCard status={status} />
+              <SentimentCard status={status} />
             </div>
-            <Spark data={equityHist} h={44} />
-            <div style={{ marginTop:8 }}>
-              <KV k="Daily P&L"  v={`${dpnl>=0?"+":""}${usd(dpnl)}`}  c={dpnl>=0?T.up:T.dn} />
-              <KV k="Drawdown"   v={`${fmt(dd)}%`}                      c={dd>5?T.dn:dd>2?T.warn:T.fg} />
-              <KV k="Status"     v={risk?.status ?? "—"}                 c={halted?T.dn:T.up} />
-              <KV k="Open Pos"   v={openPos}                             c={openPos>0?T.cyan:T.fg2} />
-            </div>
-          </Panel>
+          </div>
 
-          {/* Live Signals — one card per fired strategy */}
-          <Panel title="Live Signals" tag={`${signals.length} fired`}>
-            <div style={{ overflowY:"auto", maxHeight:"100%" }}>
-              {signals.length === 0 && (
-                <span style={{ color:T.fg3, fontSize:10 }}>No strategies fired this cycle</span>
-              )}
-              {signals.length > 0 && (
-                <div style={{ display:"grid", gridTemplateColumns:`repeat(${Math.max(1,Math.min(signals.length,4))},1fr)`, gap:8 }}>
-                  {signals.map((s, i) => (
-                    <div key={`${s.symbol}-${s.strategy}-${i}`} style={{
-                      background:T.s2, borderRadius:5, padding:"10px 12px",
-                      border:`1px solid ${s.direction==="buy"?`${T.up}50`:s.direction==="sell"?`${T.dn}50`:T.brd}`,
-                    }}>
-                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
-                        <span style={{ fontWeight:700, color:T.w, fontSize:11 }}>{s.symbol}</span>
-                        <Badge color={dirColor(s.direction)}>{(s.direction||"hold").toUpperCase()}</Badge>
-                      </div>
-                      <div style={{ fontSize:9.5, color:T.cyan, marginBottom:4, fontWeight:600 }}>
-                        {(s.strategy ?? "unknown").replace(/_/g," ").toUpperCase()}
-                      </div>
-                      <div style={{ fontSize:10, color:T.fg, marginBottom:3 }}>
-                        Conf: <span style={{ color:s.confidence>=0.7?T.up:s.confidence>=0.5?T.warn:T.dn, fontWeight:700 }}>{pct(s.confidence??0)}</span>
-                      </div>
-                      {s.reasoning && (
-                        <div style={{ fontSize:9, color:T.fg3, lineHeight:1.3, borderTop:`1px solid ${T.brd}`, paddingTop:4, marginTop:4 }}>
-                          {s.reasoning.length > 80 ? s.reasoning.slice(0,80)+"…" : s.reasoning}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </Panel>
+          {/* Positions */}
+          <PositionsTable status={status} />
 
-          {/* Sentiment */}
-          <Panel title="Sentiment" tip="Composite market sentiment. Drives confidence adjustments.">
-            {sentiment ? (() => {
-              const comp = sentiment.composite ?? 0;
-              const fg   = sentiment.fearGreed;
-              const fgRaw = fg != null ? Math.round((fg+1)*50) : null;
-              const fgLabel = fgRaw != null ? (fgRaw<=20?"Ext Fear":fgRaw<=40?"Fear":fgRaw<=60?"Neutral":fgRaw<=80?"Greed":"Ext Greed") : "—";
-              const barW   = Math.abs(comp)*100;
-              const barL   = comp>=0 ? 50 : 50-barW;
-              const sc     = sentColor(comp);
-              return (
-                <div>
-                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:0, marginBottom:8, borderBottom:`1px solid ${T.brd}`, paddingBottom:6 }}>
-                    <Metric label="Composite" value={fmt(comp)} sub={sentLabel(comp)} color={sc} />
-                    <Metric label="Fear&Greed" value={fgRaw != null ? String(fgRaw) : "—"} sub={fgLabel} color={fgRaw!=null?(fgRaw>60?T.up:fgRaw<40?T.dn:T.warn):T.fg3} />
-                  </div>
-                  {sentiment.newsSentiment != null && <KV k="News" v={fmt(sentiment.newsSentiment)} c={sentiment.newsSentiment>0.1?T.up:sentiment.newsSentiment<-0.1?T.dn:T.warn} />}
-                  {sentiment.fundingRate   != null && <KV k="Funding" v={fmt(sentiment.fundingRate)} c={sentiment.fundingRate>0.1?T.up:sentiment.fundingRate<-0.1?T.dn:T.warn} />}
-                  {sentiment.socialSentiment != null && <KV k="Social" v={fmt(sentiment.socialSentiment)} c={sentiment.socialSentiment>0.1?T.up:sentiment.socialSentiment<-0.1?T.dn:T.warn} />}
-                  <div style={{ position:"relative", height:10, background:T.bg, borderRadius:4, overflow:"hidden", border:`1px solid ${T.brd}`, marginTop:8 }}>
-                    <div style={{ position:"absolute", left:"50%", top:0, bottom:0, width:1, background:T.fg3 }} />
-                    <div style={{ position:"absolute", left:`${barL}%`, top:1, bottom:1, width:`${barW}%`, background:sc, borderRadius:3, opacity:.7, transition:"all .5s" }} />
-                  </div>
-                  <div style={{ display:"flex", justifyContent:"space-between", fontSize:7.5, color:T.fg3, marginTop:3 }}>
-                    <span>FEAR</span><span>GREED</span>
-                  </div>
-                </div>
-              );
-            })() : (
-              <div style={{ color:T.fg3, fontSize:10, textAlign:"center", padding:16 }}>Awaiting sentiment data…</div>
-            )}
-          </Panel>
+          {/* Governance pipeline */}
+          <GovernancePipeline status={status} checks={checks} />
 
-          {/* Trust Scorecard */}
-          <Panel title="Trust Scorecard" tag={`${fmt(tScore,0)}%`}>
-            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
-              <span style={{ fontSize:16, fontWeight:700, color:tierColor(tier) }}>{tier.toUpperCase()}</span>
-              <span style={{ fontSize:10, color:T.fg2 }}>size {fmt(tSize,0)}%</span>
-            </div>
-            {Object.entries(dims).map(([key, dim]) => {
-              const label = { policyCompliance:"Policy", riskDiscipline:"Risk Disc", validationCompleteness:"Validation", outcomeQuality:"Outcome" }[key] ?? key;
-              const score = dim?.score ?? 0;
-              const c = score > 0.75 ? T.up : score > 0.5 ? T.warn : T.dn;
-              return (
-                <div key={key} style={{ marginBottom:6 }}>
-                  <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, marginBottom:2 }}>
-                    <span style={{ color:T.fg2 }}>{label}</span>
-                    <span style={{ color:c }}>{pct(score)}</span>
-                  </div>
-                  <Bar value={score} color={c} />
-                </div>
-              );
-            })}
-            <div style={{ marginTop:8 }}>
-              <KV k="Chain Integrity" v={intact ? "✓ Valid" : "✗ Broken"} c={intact?T.up:T.dn} />
-              <KV k="IPFS Pinned"     v={gov.ipfsPinnedCount ?? 0} />
-            </div>
-          </Panel>
+          {/* Trade history */}
+          <TradeHistory trades={trades} />
+
+          {/* Bottom row */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <GovernanceStats status={status} />
+            <CheckpointLog checks={checks} />
+          </div>
+
+          {/* Logs */}
+          <LogStream logs={logs} />
+
+          <div style={{ height: 20 }} />
         </div>
-
-        {/* ── Row 2: Governance Pipeline (full width) ── */}
-        <Panel title="Governance Pipeline" tag="6-stage ERC-8004" tip="Every trade passes through 6 deterministic stages." full style={{ marginBottom:10 }}>
-          <div style={{ fontSize:9.5, color:T.fg2, marginBottom:8 }}>
-            Every signal traverses 6 gate stages — only trades that clear all checks execute on-chain.
-          </div>
-          <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
-            {PIPELINE_STAGES.map((s,i) => {
-              const done   = i < stagesDone;
-              const active = hasActiveStage && i === stagesDone;
-              const c = done ? T.up : active ? T.warn : T.fg3;
-              return (
-                <div key={i} style={{
-                  fontSize:9, padding:"4px 8px", borderRadius:3,
-                  background: done ? `${T.up}12` : active ? `${T.warn}12` : T.bg,
-                  border:`1px solid ${done?`${T.up}30`:active?`${T.warn}40`:T.brd}`,
-                  color:c, fontWeight:done?600:400, transition:"all .3s",
-                  position:"relative",
-                }}>
-                  {active && <div style={{ position:"absolute", top:0, left:0, right:0, height:2, background:T.warn, borderRadius:2 }} />}
-                  {done   && <div style={{ position:"absolute", top:0, left:0, right:0, height:2, background:T.up, borderRadius:2 }} />}
-                  <div style={{ fontSize:7, color:T.fg3, marginBottom:1 }}>{String(i+1).padStart(2,"0")}</div>
-                  {s}
-                  <div style={{ fontSize:7, color:c, marginTop:1 }}>{done?"PASS":active?"ACTIVE":"PEND"}</div>
-                </div>
-              );
-            })}
-          </div>
-          <div style={{ marginTop:8, display:"flex", gap:16, fontSize:10, color:T.fg2 }}>
-            <span><span style={{ color:T.up }}>■</span> Passed ({stagesDone})</span>
-            {hasActiveStage && <span><span style={{ color:T.warn }}>■</span> Active</span>}
-            <span><span style={{ color:T.fg3 }}>■</span> {cpList[0]?.eventType === "signal" ? "Skipped — HOLD signal" : `Pending (${6-stagesDone})`}</span>
-          </div>
-        </Panel>
-
-        {/* ── Row 3: Decision Engine (clickable table) ── */}
-        <Panel title="Decision Engine" tag={`${cpList.length} decisions`} tip="Chronological log of every trade decision with signals and artifacts." full noPad style={{ marginBottom:10 }}>
-          <div style={{ overflowX:"auto" }}>
-            <table style={{ width:"100%", borderCollapse:"collapse", minWidth:900 }}>
-              <thead>
-                <tr style={{ background:T.s2 }}>
-                  {["#","Time","Event","Symbol","Signal","Strategy","Price","Size","CP Hash"].map(h => (
-                    <th key={h} style={{ textAlign:"left", padding:"5px 8px", fontSize:8, letterSpacing:1.2, color:T.fg3, fontWeight:600, borderBottom:`1px solid ${T.brd}`, whiteSpace:"nowrap" }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {cpList.map((c, i) => (
-                  <tr key={c.id} onClick={()=>setSelCpIdx(i)} style={{
-                    background: i===selCpIdx ? `${T.info}08` : "transparent",
-                    cursor:"pointer", borderBottom:`1px solid ${T.brd}30`,
-                    transition:"background .1s",
-                  }}>
-                    <td style={{ padding:"5px 8px", color:T.fg3 }}>{c.id}</td>
-                    <td style={{ padding:"5px 8px", color:T.fg2, whiteSpace:"nowrap" }}>{new Date(c.timestamp).toLocaleTimeString()}</td>
-                    <td style={{ padding:"5px 8px" }}><Badge color={eventColor(c.eventType)}>{c.eventType}</Badge></td>
-                    <td style={{ padding:"5px 8px", color:T.w, fontWeight:600 }}>{c.symbol}</td>
-                    <td style={{ padding:"5px 8px", color:dirColor(c.signal), fontWeight:700 }}>{c.signal?.toUpperCase()}</td>
-                    <td style={{ padding:"5px 8px", color:T.fg2 }}>{c.data?.strategy ?? "—"}</td>
-                    <td style={{ padding:"5px 8px" }}>{c.data?.price ? `$${fmt(c.data.price,4)}` : "—"}</td>
-                    <td style={{ padding:"5px 8px" }}>{c.data?.positionSize ?? c.data?.size ? fmt(c.data.positionSize??c.data.size,6) : "—"}</td>
-                    <td style={{ padding:"5px 8px", color:T.fg3, fontFamily:"monospace", fontSize:9 }}>{c.hash?.slice(0,16)}…</td>
-                  </tr>
-                ))}
-                {cpList.length === 0 && (
-                  <tr><td colSpan={9} style={{ padding:"12px 8px", color:T.fg3 }}>No checkpoints recorded yet</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Panel>
-
-        {/* ── Row 4: Deep dive + AI Reasoning + Strategy Scores + Governance ── */}
-        <div className="col3" style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:10, marginBottom:10 }}>
-
-          {/* Selected Checkpoint Detail */}
-          {(() => {
-            const sel = cpList[selCpIdx] ?? null;
-            return (
-              <Panel title="Trade Proof" tag={sel ? `CP #${sel.id} · ${sel.eventType}` : "Select row above"}>
-                {sel ? (
-                  <div>
-                    <div style={{ marginBottom:8, paddingBottom:6, borderBottom:`1px solid ${eventColor(sel.eventType)}20` }}>
-                      <span style={{ fontSize:13, fontWeight:800, color:eventColor(sel.eventType) }}>{sel.eventType?.toUpperCase()}</span>
-                      <span style={{ fontSize:10, color:T.fg2, marginLeft:8 }}>{sel.symbol}</span>
-                    </div>
-                    <KV k="Signal"     v={(sel.signal||"—").toUpperCase()} c={dirColor(sel.signal)} />
-                    <KV k="Strategy"   v={sel.data?.strategy ?? "—"} />
-                    <KV k="Confidence" v={sel.data?.confidence ? pct(sel.data.confidence) : "—"} />
-                    <KV k="Price"      v={sel.data?.price ? `$${fmt(sel.data.price,4)}` : "—"} />
-                    <KV k="Size"       v={sel.data?.positionSize ? fmt(sel.data.positionSize,6) : "—"} />
-                    {sel.data?.pnl != null && <KV k="P&L" v={`${sel.data.pnl>=0?"+":""}${usd(sel.data.pnl)}`} c={sel.data.pnl>=0?T.up:T.dn} />}
-                    <KV k="Trust Tier" v={sel.data?.supervisoryTier ?? "—"} c={T.info} />
-                    <KV k="Slippage"   v={sel.data?.simSlippageBps ? `${fmt(sel.data.simSlippageBps,1)}bps` : "—"} />
-                    <KV k="Net Edge"   v={sel.data?.netEdgePct ? pct(sel.data.netEdgePct,3) : "—"} c={T.up} />
-                    <div style={{ marginTop:8, paddingTop:6, borderTop:`1px solid ${T.brd}` }}>
-                      <div style={{ fontSize:8.5, color:T.fg3, marginBottom:4, letterSpacing:1 }}>ARTIFACTS</div>
-                      <KV k="CP Hash" v={sel.hash?.slice(0,24)+"…"} mono />
-                      {sel.ipfsCid && <KV k="IPFS CID" v={sel.ipfsCid.slice(0,24)+"…"} c={T.info} mono />}
-                      {sel.txHash  && <KV k="Tx Hash"  v={sel.txHash.slice(0,24)+"…"}  c={T.cyan} mono />}
-                    </div>
-                  </div>
-                ) : (
-                  <div style={{ color:T.fg3, fontSize:10, textAlign:"center", padding:20 }}>Click a row in Decision Engine above</div>
-                )}
-              </Panel>
-            );
-          })()}
-
-          {/* AI Reasoning */}
-          <Panel title="AI Reasoning" tag={narrative ? `via ${narrative.source}` : "awaiting trade"} tip="Natural language explanation of the latest trade decision.">
-            {narrative ? (
-              <div style={{ fontSize:10, lineHeight:1.7, color:T.fg }}>
-                <div style={{ color:T.info, fontWeight:600, fontSize:10.5, marginBottom:8 }}>
-                  {narrative.symbol} · {new Date(narrative.timestamp).toLocaleTimeString()}
-                </div>
-                <div style={{ color:T.fg2, fontSize:10, lineHeight:1.8, padding:"8px 10px", background:T.bg, borderRadius:4, border:`1px solid ${T.brd}` }}>
-                  {narrative.narrative}
-                </div>
-                <div style={{ marginTop:8, fontSize:9, color:T.fg3 }}>
-                  Source: <span style={{ color:narrative.source==="claude"?T.purple:narrative.source==="groq"?T.cyan:T.fg2, fontWeight:600 }}>{narrative.source?.toUpperCase()}</span>
-                </div>
-              </div>
-            ) : (
-              <div style={{ color:T.fg3, fontSize:10, textAlign:"center", padding:20 }}>
-                <div style={{ marginBottom:8, fontSize:13 }}>🤖</div>
-                Awaiting first trade for AI narrative…
-                <div style={{ marginTop:8, fontSize:9, color:T.fg3 }}>Chain: Claude → Groq → Template</div>
-              </div>
-            )}
-          </Panel>
-
-          {/* Strategy Scores */}
-          <Panel title="Strategy Scores" tag={strategyEvals ? strategyEvals.symbol : "awaiting"} tip="Confidence score each strategy computed last cycle. Min threshold shown.">
-            {strategyEvals ? (
-              <div>
-                {strategyEvals.evaluations.map(e => {
-                  const c = e.signal !== "hold" ? T.up : e.confidence > 0.3 ? T.warn : T.fg3;
-                  const barVal = e.confidence;
-                  return (
-                    <div key={e.name} style={{ marginBottom:7 }}>
-                      <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, marginBottom:2 }}>
-                        <span style={{ color: e.signal !== "hold" ? T.up : T.fg2 }}>{e.name.replace(/_/g," ")}</span>
-                        <span style={{ color:c, fontWeight:600 }}>{e.signal !== "hold" ? `${e.signal.toUpperCase()} ` : ""}{pct(e.confidence)}</span>
-                      </div>
-                      <div style={{ height:4, background:T.bg, borderRadius:2, overflow:"hidden", position:"relative" }}>
-                        <div style={{ height:"100%", width:`${clamp(barVal,0,1)*100}%`, background:c, borderRadius:2, transition:"width .5s" }} />
-                        {/* threshold marker at 40% */}
-                        <div style={{ position:"absolute", top:0, bottom:0, left:"40%", width:1, background:`${T.warn}80` }} />
-                      </div>
-                    </div>
-                  );
-                })}
-                <div style={{ marginTop:6, fontSize:9, color:T.fg3 }}>Vertical line = 40% threshold · ICT/AMD only fire in Kill Zones</div>
-              </div>
-            ) : (
-              <div style={{ color:T.fg3, fontSize:10, textAlign:"center", padding:16 }}>Awaiting first cycle…</div>
-            )}
-          </Panel>
-
-          {/* Governance Counters + SAGE */}
-          <Panel title="Governance" tag="6-stage">
-            <KV k="Total Signals"    v={gov.totalSignals     ?? 0} />
-            <KV k="Vetoed"           v={gov.vetoedTrades     ?? 0} c={(gov.vetoedTrades??0)>0?T.warn:T.fg} />
-            <KV k="Mandate Violations" v={gov.mandateViolations ?? 0} c={(gov.mandateViolations??0)>0?T.dn:T.fg} />
-            <KV k="IPFS Pinned"      v={gov.ipfsPinnedCount  ?? 0} c={T.cyan} />
-            <KV k="Trades W/L"       v={`${trStats.wins??0}/${trStats.losses??0}`} c={T.up} />
-            <KV k="Win Rate"         v={trStats.total>0?pct(trStats.winRate):"-"} c={T.up} />
-            <div style={{ borderTop:`1px solid ${T.brd}`, marginTop:8, paddingTop:8 }}>
-              <div style={{ fontSize:9, color:T.fg3, marginBottom:6, textTransform:"uppercase", letterSpacing:0.5 }}>SAGE Engine</div>
-              <KV k="Adaptations"    v={sage?.totalAdaptations ?? 0} />
-              <KV k="Last reflection" v={sage?.lastReflectionAt ? new Date(sage.lastReflectionAt).toLocaleTimeString() : "—"} />
-              <KV k="Enabled"        v={sage?.enabled ? "yes" : "no"} c={sage?.enabled?T.up:T.fg2} />
-            </div>
-          </Panel>
-        </div>
-
-        {/* ── Row 5: Capital Ladder · Open Positions · Operator Controls ── */}
-        <div className="col3" style={{ display:"grid", gridTemplateColumns:"220px 1fr 220px", gap:10, marginBottom:10 }}>
-
-          {/* Trust + Capital Ladder */}
-          <Panel title="Capital Ladder" tag={tier.toUpperCase()} tip="ERC-8004 tier progression — higher tiers unlock larger position sizes.">
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:0, marginBottom:8 }}>
-              <div>
-                <div style={{ fontSize:8, color:T.fg3 }}>TRUST SCORE</div>
-                <div style={{ fontSize:18, fontWeight:700, color:truC(tScore) }}>{fmt(tScore,0)}</div>
-                <div style={{ fontSize:9, color:T.fg2 }}>{tier.toUpperCase()}</div>
-              </div>
-              <div>
-                <div style={{ fontSize:8, color:T.fg3 }}>SIZE FACTOR</div>
-                <div style={{ fontSize:18, fontWeight:700, color:T.info }}>{fmt(tSize,0)}%</div>
-                <div style={{ fontSize:9, color:T.fg2 }}>of max pos</div>
-              </div>
-            </div>
-            <div style={{ display:"grid", gap:3, marginTop:4 }}>
-              {[
-                { label:"T0 Blocked",   min:0,   mult:0,    threshold:"< 55" },
-                { label:"T1 Probation", min:55,  mult:0.25, threshold:"55–69" },
-                { label:"T2 Limited",   min:70,  mult:0.5,  threshold:"70–79" },
-                { label:"T3 Standard",  min:80,  mult:1.0,  threshold:"80–89" },
-                { label:"T4 Elevated",  min:90,  mult:1.25, threshold:"≥ 90" },
-              ].map(x => {
-                const active = tScore >= x.min && (x.min === 90 ? true : tScore < x.min + (x.min===0?55:x.min===55?15:x.min===70?10:10));
-                const c = active ? truC(tScore) : T.fg3;
-                return (
-                  <div key={x.label} style={{
-                    display:"flex", alignItems:"center", gap:8, padding:"4px 8px",
-                    borderRadius:3, background: active ? `${c}0a` : "transparent",
-                    border:`1px solid ${active ? `${c}20` : `${T.brd}40`}`,
-                  }}>
-                    <span style={{ fontSize:9, fontWeight:700, color:c, minWidth:80 }}>{x.label}</span>
-                    <div style={{ flex:1, height:3, borderRadius:2, background:T.bg, overflow:"hidden" }}>
-                      <div style={{ height:"100%", width:`${(x.mult/1.25)*100}%`, background:active?c:T.fg3, borderRadius:2 }} />
-                    </div>
-                    <span style={{ fontSize:9, color:active?T.w:T.fg3, minWidth:32, textAlign:"right" }}>{x.mult.toFixed(2)}x</span>
-                  </div>
-                );
-              })}
-            </div>
-          </Panel>
-
-          {/* Open Positions */}
-          <Panel title="Open Positions" tag={`${positions.length} open`} noPad>
-            {positions.length === 0 ? (
-              <div style={{ padding:"12px", color:T.fg3, fontSize:10 }}>No open positions</div>
-            ) : (
-              <div style={{ overflowX:"auto" }}>
-                <table style={{ width:"100%", borderCollapse:"collapse", fontSize:10.5, minWidth:600 }}>
-                  <thead>
-                    <tr style={{ color:T.fg3 }}>
-                      {["#","Symbol","Side","Size","Entry","Stop","TP","Strategy","Opened"].map(h => (
-                        <th key={h} style={{ textAlign:"left", padding:"4px 8px", borderBottom:`1px solid ${T.brd}`, fontWeight:600, fontSize:9 }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {positions.map(p => (
-                      <tr key={p.id} style={{ borderBottom:`1px solid ${T.brd}30` }}>
-                        <td style={{ padding:"4px 8px", color:T.fg3 }}>{p.id}</td>
-                        <td style={{ padding:"4px 8px", color:T.w, fontWeight:600 }}>{p.symbol}</td>
-                        <td style={{ padding:"4px 8px", color:dirColor(p.side), fontWeight:600 }}>{p.side?.toUpperCase()}</td>
-                        <td style={{ padding:"4px 8px" }}>{fmt(p.size,6)}</td>
-                        <td style={{ padding:"4px 8px" }}>${fmt(p.entryPrice,4)}</td>
-                        <td style={{ padding:"4px 8px", color:T.dn }}>{p.stopLoss?`$${fmt(p.stopLoss,4)}`:"—"}</td>
-                        <td style={{ padding:"4px 8px", color:T.up }}>{p.takeProfit?`$${fmt(p.takeProfit,4)}`:"—"}</td>
-                        <td style={{ padding:"4px 8px", color:T.fg3 }}>{p.strategy}</td>
-                        <td style={{ padding:"4px 8px", color:T.fg2 }}>{new Date(p.openedAt).toLocaleTimeString()}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </Panel>
-
-          {/* Operator Controls */}
-          <Panel title="Operator Controls" tag={opState}>
-            <div style={{ marginBottom:10 }}>
-              <div style={{ fontSize:9, color:T.fg3, marginBottom:6, textTransform:"uppercase", letterSpacing:0.5 }}>Agent Mode</div>
-              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
-                <Dot color={opState==="ACTIVE"?T.up:opState==="PAUSED"?T.warn:T.dn} pulse={opState==="ACTIVE"} />
-                <span style={{ fontWeight:700, fontSize:12, color:opState==="ACTIVE"?T.up:opState==="PAUSED"?T.warn:T.dn }}>{opState}</span>
-              </div>
-              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-                <button onClick={()=>opPost("/api/operator/resume","manual_operator_resume")} disabled={opState==="ACTIVE"} style={btn(T.up, opState==="ACTIVE")}>▶ Resume</button>
-                <button onClick={()=>opPost("/api/operator/pause","manual_operator_pause")} disabled={opState==="PAUSED"} style={btn(T.warn, opState==="PAUSED")}>⏸ Pause</button>
-                <button onClick={()=>opPost("/api/operator/emergency-stop","manual_emergency")} disabled={opState==="EMERGENCY_STOP"} style={btn(T.dn, opState==="EMERGENCY_STOP")}>⛔ Emergency Stop</button>
-              </div>
-            </div>
-            {opLog.length > 0 && (
-              <div style={{ borderTop:`1px solid ${T.brd}`, paddingTop:8 }}>
-                <div style={{ fontSize:9, color:T.fg3, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 }}>Action Log</div>
-                {opLog.slice(0,5).map((l,i) => (
-                  <div key={i} style={{ fontSize:9.5, padding:"2px 0", borderBottom:`1px solid ${T.brd}20`, display:"flex", gap:6 }}>
-                    <span style={{ color:T.fg3 }}>{l.ts}</span>
-                    <span style={{ color:l.action==="pause"?T.warn:l.action==="emergency_stop"?T.dn:T.up, fontWeight:600 }}>{l.action}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Panel>
-        </div>
-
-        {/* ── Row 6: Trade History ── */}
-        <Panel title="Trade History" tag={`${trStats.total??0} closed`} full style={{ marginBottom:10 }} noPad>
-          <div style={{ overflowX:"auto" }}>
-            <table style={{ width:"100%", borderCollapse:"collapse", fontSize:10.5, minWidth:700 }}>
-              <thead>
-                <tr style={{ color:T.fg3, background:T.s2 }}>
-                  {["Symbol","Dir","Entry","Exit","P&L","P&L%","Strategy","Duration","Exit Reason"].map(h => (
-                    <th key={h} style={{ textAlign:"left", padding:"4px 8px", borderBottom:`1px solid ${T.brd}`, fontWeight:600, fontSize:9 }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {tradeList.map(t => {
-                  const won = t.pnl >= 0;
-                  return (
-                    <tr key={t.tradeId} style={{ borderBottom:`1px solid ${T.brd}30` }}>
-                      <td style={{ padding:"4px 8px", color:T.w, fontWeight:600 }}>{t.symbol}</td>
-                      <td style={{ padding:"4px 8px", color:dirColor(t.direction) }}>{t.direction?.toUpperCase()}</td>
-                      <td style={{ padding:"4px 8px" }}>${fmt(t.entryPrice,4)}</td>
-                      <td style={{ padding:"4px 8px" }}>${fmt(t.exitPrice,4)}</td>
-                      <td style={{ padding:"4px 8px", color:won?T.up:T.dn }}>{won?"+":""}{usd(t.pnl)}</td>
-                      <td style={{ padding:"4px 8px", color:won?T.up:T.dn }}>{won?"+":""}{pct(t.pnlPct)}</td>
-                      <td style={{ padding:"4px 8px", color:T.fg3 }}>{t.strategy}</td>
-                      <td style={{ padding:"4px 8px", color:T.fg2 }}>{t.durationMs?`${Math.round(t.durationMs/60000)}m`:"—"}</td>
-                      <td style={{ padding:"4px 8px", color:T.fg3 }}>{t.exitReason}</td>
-                    </tr>
-                  );
-                })}
-                {tradeList.length === 0 && (
-                  <tr><td colSpan={9} style={{ padding:"12px 8px", color:T.fg3 }}>No closed trades yet</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Panel>
-
-        {/* ── Row 7: Checkpoint Chain + Log Stream ── */}
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
-
-          {/* Checkpoint Chain */}
-          <Panel title="Checkpoint Chain" tag={intact?"✓ intact":"✗ broken"} noPad>
-            <div style={{ overflowX:"auto" }}>
-              <table style={{ width:"100%", borderCollapse:"collapse", fontSize:10.5 }}>
-                <thead>
-                  <tr style={{ color:T.fg3 }}>
-                    {["#","Time","Event","Symbol","Signal","Hash"].map(h => (
-                      <th key={h} style={{ textAlign:"left", padding:"3px 8px", borderBottom:`1px solid ${T.brd}`, fontWeight:600, fontSize:9 }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {cpList.slice(0,15).map(c => (
-                    <tr key={c.id} style={{ borderBottom:`1px solid ${T.brd}20` }}>
-                      <td style={{ padding:"3px 8px", color:T.fg3 }}>{c.id}</td>
-                      <td style={{ padding:"3px 8px", color:T.fg2 }}>{new Date(c.timestamp).toLocaleTimeString()}</td>
-                      <td style={{ padding:"3px 8px" }}><Badge color={eventColor(c.eventType)}>{c.eventType}</Badge></td>
-                      <td style={{ padding:"3px 8px", color:T.w }}>{c.symbol}</td>
-                      <td style={{ padding:"3px 8px", color:dirColor(c.signal) }}>{c.signal}</td>
-                      <td style={{ padding:"3px 8px", color:T.fg3, fontFamily:"monospace", fontSize:9 }}>{c.hash?.slice(0,16)}…</td>
-                    </tr>
-                  ))}
-                  {cpList.length === 0 && (
-                    <tr><td colSpan={6} style={{ padding:"8px", color:T.fg3 }}>No checkpoints yet</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </Panel>
-
-          {/* Log Stream */}
-          <Panel title="Log Stream" tag="live">
-            <div style={{
-              maxHeight:220, overflowY:"auto", fontFamily:"monospace", fontSize:10.5,
-              background:T.bg, borderRadius:4, padding:8,
-            }}>
-              {logs.slice().reverse().map((l,i) => {
-                const c = l.level==="ERROR"?T.dn : l.level==="WARN"?T.warn : l.level==="INFO"?T.fg : T.fg3;
-                return (
-                  <div key={i} style={{ padding:"1px 0", color:c, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
-                    <span style={{ color:T.fg3 }}>{l.time ? new Date(l.time).toLocaleTimeString() : ""} </span>
-                    <span style={{ color:T.fg2 }}>[{l.logger}] </span>
-                    {l.msg}
-                  </div>
-                );
-              })}
-              {logs.length === 0 && <span style={{ color:T.fg3 }}>No logs yet</span>}
-            </div>
-          </Panel>
-        </div>
-
       </div>
     </div>
   );
