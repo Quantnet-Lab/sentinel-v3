@@ -106,10 +106,12 @@ export async function loadIdentity(): Promise<AgentIdentity> {
   return cachedIdentity;
 }
 
+// Cache whether our wallet is an authorized validator — checked once, then remembered.
+let _isValidator: boolean | null = null;
+
 export async function postCheckpointOnChain(params: {
   agentId: number;
   dataHash: string;
-  signature: string;
 }): Promise<string | null> {
   const key = config.agentWalletPrivateKey || config.privateKey;
   if (!key || !config.validationRegistry) return null;
@@ -117,13 +119,38 @@ export async function postCheckpointOnChain(params: {
   try {
     const provider = new ethers.JsonRpcProvider(config.rpcUrl);
     const wallet = new ethers.Wallet(key, provider);
-    const abi = ['function attest(uint256 agentId, bytes32 dataHash, bytes signature) external'];
+    const abi = [
+      'function postEIP712Attestation(uint256 agentId, bytes32 checkpointHash, uint8 score, string calldata notes) external',
+      'function openValidation() external view returns (bool)',
+      'function validators(address) external view returns (bool)',
+    ];
     const contract = new ethers.Contract(config.validationRegistry, abi, wallet);
-    const tx = await contract.attest(params.agentId, params.dataHash, params.signature);
+
+    // Check authorization once — skip silently if not a validator
+    if (_isValidator == null) {
+      try {
+        const open = await contract.openValidation();
+        const listed = await contract.validators(wallet.address);
+        _isValidator = open || listed;
+        if (!_isValidator) {
+          log.warn('[IDENTITY] Wallet is not an authorized validator — on-chain attestation disabled');
+        }
+      } catch {
+        _isValidator = false;
+      }
+    }
+    if (!_isValidator) return null;
+
+    const tx = await contract.postEIP712Attestation(
+      params.agentId,
+      params.dataHash,
+      80,   // score 0-100
+      '',
+    );
     await tx.wait();
     return tx.hash;
-  } catch (e) {
-    log.warn(`[IDENTITY] On-chain attest failed: ${e}`);
+  } catch (e: any) {
+    log.warn(`[IDENTITY] On-chain attest failed: ${e?.reason ?? e?.message ?? e}`);
     return null;
   }
 }

@@ -330,8 +330,8 @@ async function executeSignal(
       },
     });
 
-    if (config.validationRegistry && cp.signature && config.agentId != null) {
-      postCheckpointOnChain({ agentId: config.agentId, dataHash: cp.hash, signature: cp.signature }).catch(() => {});
+    if (config.validationRegistry && config.agentId != null) {
+      postCheckpointOnChain({ agentId: config.agentId, dataHash: cp.hash }).catch(() => {});
     }
 
     log.info(`[AGENT] ✓ Trade opened: ${symbol} ${signal.direction.toUpperCase()} size=${riskDecision.positionSize.toFixed(6)} @ ${signal.price.toFixed(4)} | ${signal.strategy} | CP#${cp.id}`);

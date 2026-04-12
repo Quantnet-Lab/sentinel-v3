@@ -35,6 +35,8 @@ const RISK_ROUTER_ABI = [
   'function getPosition(bytes32 intentId) external view returns (bool open, uint256 entryPrice, uint256 size, int256 pnl)',
   // Agent sandbox balance from vault
   'function getAgentBalance(uint256 agentId) external view returns (uint256)',
+  // Per-agent nonce (starts at 0, increments on each approved intent)
+  'function intentNonces(uint256 agentId) external view returns (uint256)',
   // Events
   'event IntentSubmitted(uint256 indexed agentId, bytes32 indexed intentId, string pair, string action, uint256 amountUsdScaled)',
   'event PositionClosed(uint256 indexed agentId, bytes32 indexed intentId, uint256 exitPriceE8, int256 pnl)',
@@ -76,8 +78,23 @@ function getWallet(): ethers.Wallet | null {
   }
 }
 
-let _intentNonce = Math.floor(Date.now() / 1000);
-function nextNonce(): number { return ++_intentNonce; }
+// Per-agent nonce — must match _intentNonces[agentId] on the Risk Router (starts at 0).
+// We fetch the on-chain value before the first submission and track it locally.
+const _agentNonce: Record<number, number> = {};
+
+async function getNextNonce(router: ethers.Contract, agentId: number): Promise<number> {
+  if (_agentNonce[agentId] == null) {
+    try {
+      const onChain = await router.intentNonces(agentId);
+      _agentNonce[agentId] = Number(onChain);
+      log.info(`[ROUTER] Nonce for agentId=${agentId}: ${_agentNonce[agentId]} (from chain)`);
+    } catch {
+      _agentNonce[agentId] = 0;
+      log.warn(`[ROUTER] Could not fetch nonce — starting at 0`);
+    }
+  }
+  return _agentNonce[agentId];
+}
 
 // ── Agent registration ────────────────────────────────────────────────────────
 
@@ -191,16 +208,20 @@ export async function submitTradeIntent(params: {
     return { submitted: false, intentId: null, txHash: null, error: 'No wallet or router address' };
   }
 
-  const nonce = nextNonce();
   const deadline = Math.floor(Date.now() / 1000) + 300; // 5 min window
-  // amountUsdScaled: notional value in USD scaled by 1e6
-  const amountUsdScaled = Math.round(params.price * params.size * 1e6);
+  // amountUsdScaled: contract uses USD * 100 (e.g. $500 → 50000)
+  const amountUsdScaled = Math.round(params.price * params.size * 100);
   const maxSlippageBps = 100; // 1% slippage tolerance
   // Contract verifies EIP-712 hash with uppercase strings — sign and submit must match exactly
   const action = params.direction.toUpperCase(); // "BUY" | "SELL"
   const pair   = params.symbol.toUpperCase();    // "BTCUSD" etc.
 
   try {
+    const router = new ethers.Contract(config.riskRouterAddress, RISK_ROUTER_ABI, wallet);
+
+    // Fetch on-chain nonce — contract requires intent.nonce == _intentNonces[agentId]
+    const nonce = await getNextNonce(router, params.agentId);
+
     // Sign the TradeIntent with EIP-712 (RiskRouter domain)
     const signature = await signTradeIntent({
       agentId:         params.agentId,
@@ -217,9 +238,7 @@ export async function submitTradeIntent(params: {
       return { submitted: false, intentId: null, txHash: null, error: 'Signing failed — no private key' };
     }
 
-    const router = new ethers.Contract(config.riskRouterAddress, RISK_ROUTER_ABI, wallet);
-
-    log.info(`[ROUTER] Submitting TradeIntent: ${action} ${pair} ~$${(amountUsdScaled / 1e6).toFixed(2)}`);
+    log.info(`[ROUTER] Submitting TradeIntent: ${action} ${pair} ~$${(amountUsdScaled / 100).toFixed(2)} | nonce=${nonce}`);
 
     const tx = await router.submitIntent(
       params.agentId,
@@ -234,6 +253,9 @@ export async function submitTradeIntent(params: {
     );
 
     const receipt = await tx.wait();
+
+    // Intent approved — increment local nonce to stay in sync
+    _agentNonce[params.agentId] = nonce + 1;
 
     // Extract intentId from IntentSubmitted event
     let intentId: string | null = null;
