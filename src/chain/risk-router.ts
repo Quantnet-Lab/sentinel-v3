@@ -253,6 +253,7 @@ export async function submitTradeIntent(params: {
   } catch (e: any) {
     const msg = e?.reason ?? e?.message ?? String(e);
     log.warn(`[ROUTER] Submit failed: ${msg}`);
+    if (e?.transaction) log.warn(`[ROUTER] Failed tx: to=${e.transaction.to} data=${String(e.transaction.data).slice(0, 74)}…`);
     return { submitted: false, intentId: null, txHash: null, error: msg };
   }
 }

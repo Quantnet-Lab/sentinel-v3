@@ -6,7 +6,7 @@ Sentinel is an ERC-8004 compliant autonomous trading agent built for the hackath
 
 **Live Dashboard:** [https://sentinel-v3-production.up.railway.app](https://sentinel-v3-production.up.railway.app)
 
-**Agent ID:** 19 | **Network:** Sepolia | **Wallet:** `0x0f38EC46e5eb7A57cF5371cb259546DE0F896c0A`
+**Agent ID:** 87 | **Network:** Sepolia | **Wallet:** `0x0D1C6676825b13193E703cD7E31FbE3fA4b4A559`
 
 ---
 

@@ -6,11 +6,19 @@
 import { ethers } from 'ethers';
 import { config } from '../agent/config.js';
 
-const DOMAIN = {
+const TRADE_DOMAIN = {
   name: 'RiskRouter',
   version: '1',
   chainId: config.chainId,
   verifyingContract: config.riskRouterAddress as `0x${string}`,
+};
+
+// Checkpoints are attested to the ValidationRegistry — its address must be the verifyingContract
+const CHECKPOINT_DOMAIN = {
+  name: 'RiskRouter',
+  version: '1',
+  chainId: config.chainId,
+  verifyingContract: (config.validationRegistry || config.riskRouterAddress) as `0x${string}`,
 };
 
 const TRADE_INTENT_TYPES = {
@@ -76,7 +84,7 @@ export async function signTradeIntent(params: {
   };
 
   try {
-    return await wallet.signTypedData(DOMAIN, TRADE_INTENT_TYPES, value);
+    return await wallet.signTypedData(TRADE_DOMAIN, TRADE_INTENT_TYPES, value);
   } catch {
     return null;
   }
@@ -102,7 +110,7 @@ export async function signCheckpoint(params: {
   };
 
   try {
-    return await wallet.signTypedData(DOMAIN, CHECKPOINT_TYPES, value);
+    return await wallet.signTypedData(CHECKPOINT_DOMAIN, CHECKPOINT_TYPES, value);
   } catch {
     return null;
   }
