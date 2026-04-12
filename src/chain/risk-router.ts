@@ -196,14 +196,17 @@ export async function submitTradeIntent(params: {
   // amountUsdScaled: notional value in USD scaled by 1e6
   const amountUsdScaled = Math.round(params.price * params.size * 1e6);
   const maxSlippageBps = 100; // 1% slippage tolerance
+  // Contract verifies EIP-712 hash with uppercase strings — sign and submit must match exactly
+  const action = params.direction.toUpperCase(); // "BUY" | "SELL"
+  const pair   = params.symbol.toUpperCase();    // "BTCUSD" etc.
 
   try {
     // Sign the TradeIntent with EIP-712 (RiskRouter domain)
     const signature = await signTradeIntent({
       agentId:         params.agentId,
       agentWallet:     wallet.address,
-      pair:            params.symbol,
-      action:          params.direction,
+      pair,
+      action,
       amountUsdScaled,
       maxSlippageBps,
       nonce,
@@ -216,13 +219,13 @@ export async function submitTradeIntent(params: {
 
     const router = new ethers.Contract(config.riskRouterAddress, RISK_ROUTER_ABI, wallet);
 
-    log.info(`[ROUTER] Submitting TradeIntent: ${params.direction.toUpperCase()} ${params.symbol} ~$${(amountUsdScaled / 1e6).toFixed(2)}`);
+    log.info(`[ROUTER] Submitting TradeIntent: ${action} ${pair} ~$${(amountUsdScaled / 1e6).toFixed(2)}`);
 
     const tx = await router.submitIntent(
       params.agentId,
       wallet.address,
-      params.symbol,
-      params.direction,
+      pair,
+      action,
       BigInt(amountUsdScaled),
       BigInt(maxSlippageBps),
       BigInt(nonce),
