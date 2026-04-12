@@ -27,19 +27,15 @@ const log = createLogger('ROUTER');
 // ── ABIs ─────────────────────────────────────────────────────────────────────
 
 const RISK_ROUTER_ABI = [
-  // Submit a signed trade intent — new struct format
-  'function submitIntent(uint256 agentId, address agentWallet, string pair, string action, uint256 amountUsdScaled, uint256 maxSlippageBps, uint256 nonce, uint256 deadline, bytes signature) external returns (bytes32)',
-  // Close an open position
-  'function closePosition(bytes32 intentId, uint256 exitPriceE8) external',
-  // Query open position
-  'function getPosition(bytes32 intentId) external view returns (bool open, uint256 entryPrice, uint256 size, int256 pnl)',
-  // Agent sandbox balance from vault
-  'function getAgentBalance(uint256 agentId) external view returns (uint256)',
+  // Submit a signed trade intent (tuple form — verified against deployed bytecode)
+  'function submitTradeIntent(tuple(uint256 agentId, address agentWallet, string pair, string action, uint256 amountUsdScaled, uint256 maxSlippageBps, uint256 nonce, uint256 deadline) intent, bytes signature) external',
+  // Dry-run — returns (valid, reason) without spending gas on a rejected trade
+  'function simulateIntent(tuple(uint256 agentId, address agentWallet, string pair, string action, uint256 amountUsdScaled, uint256 maxSlippageBps, uint256 nonce, uint256 deadline) intent) external view returns (bool valid, string reason)',
   // Per-agent nonce (starts at 0, increments on each approved intent)
-  'function intentNonces(uint256 agentId) external view returns (uint256)',
+  'function getIntentNonce(uint256 agentId) external view returns (uint256)',
   // Events
-  'event IntentSubmitted(uint256 indexed agentId, bytes32 indexed intentId, string pair, string action, uint256 amountUsdScaled)',
-  'event PositionClosed(uint256 indexed agentId, bytes32 indexed intentId, uint256 exitPriceE8, int256 pnl)',
+  'event TradeApproved(uint256 indexed agentId, bytes32 indexed intentHash, uint256 amountUsdScaled)',
+  'event TradeRejected(uint256 indexed agentId, bytes32 indexed intentHash, string reason)',
 ];
 
 const VAULT_ABI = [
@@ -84,14 +80,9 @@ const _agentNonce: Record<number, number> = {};
 
 async function getNextNonce(router: ethers.Contract, agentId: number): Promise<number> {
   if (_agentNonce[agentId] == null) {
-    try {
-      const onChain = await router.intentNonces(agentId);
-      _agentNonce[agentId] = Number(onChain);
-      log.info(`[ROUTER] Nonce for agentId=${agentId}: ${_agentNonce[agentId]} (from chain)`);
-    } catch {
-      _agentNonce[agentId] = 0;
-      log.warn(`[ROUTER] Could not fetch nonce — starting at 0`);
-    }
+    const onChain = await router.getIntentNonce(agentId);
+    _agentNonce[agentId] = Number(onChain);
+    log.info(`[ROUTER] Nonce for agentId=${agentId}: ${_agentNonce[agentId]} (from chain)`);
   }
   return _agentNonce[agentId];
 }
@@ -219,8 +210,28 @@ export async function submitTradeIntent(params: {
   try {
     const router = new ethers.Contract(config.riskRouterAddress, RISK_ROUTER_ABI, wallet);
 
-    // Fetch on-chain nonce — contract requires intent.nonce == _intentNonces[agentId]
+    // Fetch on-chain nonce — contract requires intent.nonce == getIntentNonce(agentId)
     const nonce = await getNextNonce(router, params.agentId);
+
+    const intentTuple = {
+      agentId:         BigInt(params.agentId),
+      agentWallet:     wallet.address,
+      pair,
+      action,
+      amountUsdScaled: BigInt(amountUsdScaled),
+      maxSlippageBps:  BigInt(maxSlippageBps),
+      nonce:           BigInt(nonce),
+      deadline:        BigInt(deadline),
+    };
+
+    // Dry-run before spending gas
+    try {
+      const [valid, reason] = await router.simulateIntent(intentTuple);
+      if (!valid) {
+        log.warn(`[ROUTER] simulateIntent rejected: ${reason}`);
+        return { submitted: false, intentId: null, txHash: null, error: reason };
+      }
+    } catch { /* simulateIntent failure is non-fatal — proceed anyway */ }
 
     // Sign the TradeIntent with EIP-712 (RiskRouter domain)
     const signature = await signTradeIntent({
@@ -240,42 +251,35 @@ export async function submitTradeIntent(params: {
 
     log.info(`[ROUTER] Submitting TradeIntent: ${action} ${pair} ~$${(amountUsdScaled / 100).toFixed(2)} | nonce=${nonce}`);
 
-    const tx = await router.submitIntent(
-      params.agentId,
-      wallet.address,
-      pair,
-      action,
-      BigInt(amountUsdScaled),
-      BigInt(maxSlippageBps),
-      BigInt(nonce),
-      BigInt(deadline),
-      signature,
-    );
-
+    const tx = await router.submitTradeIntent(intentTuple, signature);
     const receipt = await tx.wait();
 
     // Intent approved — increment local nonce to stay in sync
     _agentNonce[params.agentId] = nonce + 1;
 
-    // Extract intentId from IntentSubmitted event
+    // Parse TradeApproved / TradeRejected events
     let intentId: string | null = null;
+    let rejectReason: string | null = null;
     const iface = new ethers.Interface(RISK_ROUTER_ABI);
     for (const l of receipt.logs) {
       try {
-        const parsed = iface.parseLog(l);
-        if (parsed?.name === 'IntentSubmitted') {
-          intentId = parsed.args[1] as string;
-        }
+        const parsed = iface.parseLog({ topics: [...l.topics], data: l.data });
+        if (parsed?.name === 'TradeApproved') intentId = parsed.args.intentHash as string;
+        if (parsed?.name === 'TradeRejected') rejectReason = parsed.args.reason as string;
       } catch {}
     }
 
-    log.info(`[ROUTER] ✓ Intent submitted | intentId=${intentId ?? 'unknown'} | tx=${tx.hash}`);
-    return { submitted: true, intentId, txHash: tx.hash, error: null };
+    if (rejectReason) {
+      log.warn(`[ROUTER] Trade rejected on-chain: ${rejectReason}`);
+      return { submitted: false, intentId: null, txHash: receipt.hash, error: rejectReason };
+    }
+
+    log.info(`[ROUTER] ✓ Intent submitted | intentHash=${intentId ?? 'unknown'} | tx=${receipt.hash}`);
+    return { submitted: true, intentId, txHash: receipt.hash, error: null };
 
   } catch (e: any) {
     const msg = e?.reason ?? e?.message ?? String(e);
     log.warn(`[ROUTER] Submit failed: ${msg}`);
-    if (e?.transaction) log.warn(`[ROUTER] Failed tx: to=${e.transaction.to} data=${String(e.transaction.data).slice(0, 74)}…`);
     return { submitted: false, intentId: null, txHash: null, error: msg };
   }
 }
