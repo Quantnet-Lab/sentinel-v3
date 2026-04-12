@@ -64,6 +64,8 @@ const REPUTATION_ABI = [
 
 // ── Provider / wallet ─────────────────────────────────────────────────────────
 
+// ── Wallet / nonce management ─────────────────────────────────────────────────
+
 function getWallet(): ethers.Wallet | null {
   const key = config.agentWalletPrivateKey || config.privateKey;
   if (!key || !config.rpcUrl) return null;
@@ -74,17 +76,28 @@ function getWallet(): ethers.Wallet | null {
   }
 }
 
-// Per-agent nonce — must match _intentNonces[agentId] on the Risk Router (starts at 0).
-// We fetch the on-chain value before the first submission and track it locally.
-const _agentNonce: Record<number, number> = {};
+// NonceManager wraps the wallet so concurrent submitTradeIntent calls each get a
+// unique EOA nonce — prevents "replacement fee too low" errors.
+let _nonceManager: ethers.NonceManager | null = null;
+function getNonceManagedSigner(wallet: ethers.Wallet): ethers.NonceManager {
+  if (!_nonceManager) _nonceManager = new ethers.NonceManager(wallet);
+  return _nonceManager;
+}
 
-async function getNextNonce(router: ethers.Contract, agentId: number): Promise<number> {
+// Per-agent contract nonce — must equal getIntentNonce(agentId) on the Risk Router.
+// _queueTail serializes submissions so concurrent trades never collide on nonce.
+const _agentNonce: Record<number, number> = {};
+let _queueTail: Promise<void> = Promise.resolve();
+
+async function acquireNonce(router: ethers.Contract, agentId: number): Promise<{ nonce: number; rollback: () => void }> {
   if (_agentNonce[agentId] == null) {
     const onChain = await router.getIntentNonce(agentId);
     _agentNonce[agentId] = Number(onChain);
     log.info(`[ROUTER] Nonce for agentId=${agentId}: ${_agentNonce[agentId]} (from chain)`);
   }
-  return _agentNonce[agentId];
+  const nonce = _agentNonce[agentId];
+  _agentNonce[agentId] = nonce + 1; // reserve optimistically
+  return { nonce, rollback: () => { _agentNonce[agentId] = nonce; } };
 }
 
 // ── Agent registration ────────────────────────────────────────────────────────
@@ -185,7 +198,26 @@ export interface RouterSubmitResult {
   error: string | null;
 }
 
-export async function submitTradeIntent(params: {
+export function submitTradeIntent(params: {
+  agentId: number;
+  symbol: string;
+  direction: 'buy' | 'sell';
+  price: number;
+  size: number;
+  stopLoss: number;
+  takeProfit: number;
+}): Promise<RouterSubmitResult> {
+  // Serialize all submissions through _queueTail so concurrent trades never
+  // collide on the contract nonce or EOA nonce.
+  const result = new Promise<RouterSubmitResult>(resolve => {
+    _queueTail = _queueTail.then(() => _doSubmit(params).then(resolve)).catch(() => resolve(
+      { submitted: false, intentId: null, txHash: null, error: 'Queue error' }
+    ));
+  });
+  return result;
+}
+
+async function _doSubmit(params: {
   agentId: number;
   symbol: string;
   direction: 'buy' | 'sell';
@@ -199,6 +231,7 @@ export async function submitTradeIntent(params: {
     return { submitted: false, intentId: null, txHash: null, error: 'No wallet or router address' };
   }
 
+  const signer = getNonceManagedSigner(wallet);
   const deadline = Math.floor(Date.now() / 1000) + 300; // 5 min window
   // amountUsdScaled: contract uses USD * 100 (e.g. $500 → 50000)
   const amountUsdScaled = Math.round(params.price * params.size * 100);
@@ -207,12 +240,14 @@ export async function submitTradeIntent(params: {
   const action = params.direction.toUpperCase(); // "BUY" | "SELL"
   const pair   = params.symbol.toUpperCase();    // "BTCUSD" etc.
 
+  // Use read-only provider for view calls, signer for state-changing calls
+  const provider = wallet.provider!;
+  const routerRead  = new ethers.Contract(config.riskRouterAddress, RISK_ROUTER_ABI, provider);
+  const routerWrite = new ethers.Contract(config.riskRouterAddress, RISK_ROUTER_ABI, signer);
+
+  const { nonce, rollback } = await acquireNonce(routerRead, params.agentId);
+
   try {
-    const router = new ethers.Contract(config.riskRouterAddress, RISK_ROUTER_ABI, wallet);
-
-    // Fetch on-chain nonce — contract requires intent.nonce == getIntentNonce(agentId)
-    const nonce = await getNextNonce(router, params.agentId);
-
     const intentTuple = {
       agentId:         BigInt(params.agentId),
       agentWallet:     wallet.address,
@@ -226,8 +261,9 @@ export async function submitTradeIntent(params: {
 
     // Dry-run before spending gas
     try {
-      const [valid, reason] = await router.simulateIntent(intentTuple);
+      const [valid, reason] = await routerRead.simulateIntent(intentTuple);
       if (!valid) {
+        rollback();
         log.warn(`[ROUTER] simulateIntent rejected: ${reason}`);
         return { submitted: false, intentId: null, txHash: null, error: reason };
       }
@@ -246,16 +282,14 @@ export async function submitTradeIntent(params: {
     });
 
     if (!signature) {
+      rollback();
       return { submitted: false, intentId: null, txHash: null, error: 'Signing failed — no private key' };
     }
 
     log.info(`[ROUTER] Submitting TradeIntent: ${action} ${pair} ~$${(amountUsdScaled / 100).toFixed(2)} | nonce=${nonce}`);
 
-    const tx = await router.submitTradeIntent(intentTuple, signature);
+    const tx = await routerWrite.submitTradeIntent(intentTuple, signature);
     const receipt = await tx.wait();
-
-    // Intent approved — increment local nonce to stay in sync
-    _agentNonce[params.agentId] = nonce + 1;
 
     // Parse TradeApproved / TradeRejected events
     let intentId: string | null = null;
@@ -270,6 +304,7 @@ export async function submitTradeIntent(params: {
     }
 
     if (rejectReason) {
+      rollback(); // nonce was consumed but trade rejected — re-sync from chain next call
       log.warn(`[ROUTER] Trade rejected on-chain: ${rejectReason}`);
       return { submitted: false, intentId: null, txHash: receipt.hash, error: rejectReason };
     }
@@ -278,6 +313,7 @@ export async function submitTradeIntent(params: {
     return { submitted: true, intentId, txHash: receipt.hash, error: null };
 
   } catch (e: any) {
+    rollback();
     const msg = e?.reason ?? e?.message ?? String(e);
     log.warn(`[ROUTER] Submit failed: ${msg}`);
     return { submitted: false, intentId: null, txHash: null, error: msg };
