@@ -1,98 +1,80 @@
-# Sentinel v3 — ERC-8004 Autonomous Trading Agent
+# Sentinel: Autonomous On-Chain Trading Agent
 
-Sentinel is a fully autonomous on-chain trading agent built for the ERC-8004 standard. It runs a 6-stage governance pipeline per symbol, signs TradeIntents with EIP-712, submits them to the Sepolia Risk Router, and records every decision to IPFS as a tamper-proof audit trail. The agent learns from its own trade history via a bounded adaptive engine (CAGE).
+## Overview
 
----
+Sentinel is an ERC-8004 compliant autonomous trading agent built for the hackathon on Ethereum Sepolia. The system executes institutional-grade crypto trades through a 6-stage governance pipeline that enforces trust, compliance, and risk controls before any position is opened. Every decision is signed with EIP-712, submitted to the on-chain Risk Router, and recorded to IPFS as a tamper-proof audit trail.
 
-## Quick Start
+**Live Dashboard:** [https://sentinel-v3-production.up.railway.app](https://sentinel-v3-production.up.railway.app)
 
-```bash
-# 1. Install dependencies
-npm install
-
-# 2. Copy and fill environment variables
-cp .env.example .env
-# Edit .env — see Environment Variables section below
-
-# 3. Register your agent on-chain (run once)
-npm run register
-
-# 4. Start the agent
-npm run dev
-
-# Dashboard: http://localhost:3000
-# MCP server: http://localhost:3001
-```
+**Agent ID:** 19 | **Network:** Sepolia | **Wallet:** `0x0f38EC46e5eb7A57cF5371cb259546DE0F896c0A`
 
 ---
 
-## Architecture
+## Core Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Sentinel v3 Agent                       │
-│                                                              │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐  │
-│  │ Oracle   │→ │ Signal   │→ │Sentiment │→ │ Risk Gate  │  │
-│  │(Kraken)  │  │(3 strats)│  │(F&G/Fund)│  │(Manager)   │  │
-│  └──────────┘  └──────────┘  └──────────┘  └────────────┘  │
-│                                                    │         │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐  │
-│  │ SAGE     │  │ Adaptive │  │ Record   │← │ Execute    │  │
-│  │ Engine   │  │ Learning │  │(IPFS/CP) │  │(Kraken)    │  │
-│  └──────────┘  └──────────┘  └──────────┘  └────────────┘  │
-│                                                              │
-│            ERC-8004 Risk Router (Sepolia)                    │
-│            EIP-712 TradeIntent Submission                    │
-└─────────────────────────────────────────────────────────────┘
-```
+The system implements a 6-stage governance pipeline that runs every 60 seconds across all configured symbols:
 
-### 6-Stage Pipeline (per symbol, every cycle)
-
-| Stage | Name | What it does |
-|-------|------|--------------|
-| 1 | **Oracle** | Fetches live 1-min candles from Kraken REST + data integrity check |
-| 2 | **Signal** | Runs 3 strategies (order_block, engulfing, momentum) via ensemble |
-| 3 | **Sentiment** | Fear & Greed + funding rate proxy adjusts confidence |
-| 4 | **Risk Gate** | Mandate check, position limits, drawdown, daily loss, circuit breaker, execution simulation |
-| 5 | **Execute** | Places paper/live order on Kraken; submits EIP-712 TradeIntent on-chain |
-| 6 | **Record** | Saves tamper-evident checkpoint to IPFS, logs to dashboard |
+**Trading Pipeline Stages:**
+1. Oracle — fetches live 1-minute candles from Kraken REST with data integrity verification
+2. Signal — runs 3 independent strategies (Order Block, Engulfing, Momentum) via an ensemble with confluence scoring
+3. Sentiment — Fear & Greed index and funding rate proxy adjust signal confidence up or down
+4. Risk Gate — mandate check, position limits, drawdown guard, circuit breaker, and execution simulation veto
+5. Execute — places paper or live order on Kraken; submits EIP-712 signed TradeIntent to the on-chain Risk Router
+6. Record — saves tamper-evident checkpoint to IPFS and streams results to the live dashboard
 
 ---
 
 ## Trading Strategies
 
-See [TRADING.md](TRADING.md) for full details.
+Sentinel runs three strategies simultaneously on every symbol every cycle. Each returns an independent confidence score; the ensemble picks the highest after applying a confluence bonus when strategies agree.
 
-| Strategy | Signal | Confidence Range |
-|----------|--------|-----------------|
-| Order Block | Price retests institutional OB zone, optional BOS/FVG/sweep bonuses | 52–92% |
-| Engulfing | Engulfing candle at swing high/low with ATR body filter | 55–82% |
-| Momentum | EMA(20/50) crossover + MACD confirmation, regime-aware | 45–85% |
+**Order Block (ICT/SMC):** Detects the last bearish candle before a bullish displacement (bullish OB) or vice versa. Prices retesting institutional order block zones with BOS, FVG, or liquidity sweep confirmation generate high-confidence signals. Confidence range: 52–92%.
 
-### Ensemble
-All 3 run every cycle per symbol. Confluence bonus applied when 2+ strategies agree direction (+5%) or all 3 agree (+8%). Highest-confidence signal above `MIN_CONFIDENCE` wins.
+**Engulfing at Key Level:** Identifies bullish or bearish engulfing candles at swing highs/lows and order block zones. Requires the engulfing body to be at least 40% of the candle range to filter weak signals. Confidence range: 55–82%.
 
-### Adaptive Learning (CAGE)
-After every 10 trades, the agent adjusts 3 parameters within hard bounds:
-- **SL ATR multiple** — widens if stop-hit rate > 60%, tightens if < 20% (bounds: 1.0–2.5)
-- **Position size %** — shrinks on win rate < 35%, grows on > 55% (bounds: 1–4% equity)
-- **Confidence threshold** — raises if false signal rate > 50% (bounds: 5–30%)
+**EMA Momentum:** Uses EMA(20) vs EMA(50) separation and MACD histogram for trend confirmation. Fully regime-aware — suppressed in ranging markets to avoid choppy signals, penalised in volatile regimes with wider stops. Confidence range: 45–85%.
 
-### SAGE Engine
-Self-Adapting Generative Engine: runs a Groq/Gemini reflection after each trade, produces adaptive playbook rules that adjust ensemble weights.
+**Ensemble Confluence:** When two strategies agree on direction, confidence receives a +5% bonus. When all three agree, +8%. The highest-confidence signal above the minimum threshold wins.
 
 ---
 
-## On-Chain Setup (ERC-8004)
+## Risk Management
 
-### Deployed Agent
-- **agentId:** `19`
-- **Wallet:** `0x51E8bf572a357f501aB3393f13183b9f7a6B0775`
-- **Network:** Sepolia testnet
-- **Age:** ~5 days active
+Every signal must pass through the risk gate before execution. The gate enforces position limits (max 5 open), daily loss cap (3% equity), maximum drawdown (10% from peak), and a circuit breaker that halts trading after three consecutive losses.
 
-### Contracts
+**Trust-Adjusted Position Sizing:** A 4-dimension trust scorecard (accuracy, compliance, data quality, SAGE confidence) produces a tier from Probation to Elite, with a size factor of 0.25× to 1.00× applied to every position. The agent automatically trades smaller when its recent behaviour suggests reduced reliability.
+
+**Execution Simulation Gate:** Before every order, a slippage model estimates notional cost in basis points. Trades are vetoed if estimated slippage exceeds 120 bps or if net edge after costs is zero or negative.
+
+**Stop-Out Grace Period:** Newly opened positions are immune to stop-loss checks for the first 5 minutes, preventing immediate stop-outs caused by the divergence between candle close prices used for entry and live ticker prices used for close monitoring.
+
+**Trailing Stop:** Once a position is profitable by 0.5% or more, the stop trails at 2× ATR from the high-water mark to lock in gains.
+
+---
+
+## Adaptive Learning (CAGE)
+
+After every 10 closed trades, Sentinel adjusts three parameters within immutable hard bounds:
+
+- **Stop-loss ATR multiple** — widens if stop-hit rate exceeds 60%, tightens below 20% (bounds: 1.0–2.5×)
+- **Position size percentage** — shrinks if win rate falls below 35%, grows above 55% (bounds: 1–4% equity)
+- **Confidence threshold** — raises if false signal rate exceeds 50%, lowers below 25% (bounds: 5–30%)
+
+A 5-cycle cooldown between adaptations prevents overfitting. Every adaptation produces an auditable artifact visible in the dashboard Decision Log. A Bayesian context memory also tracks win rates per regime and direction, applying a small confidence bias (±12% max) to signals in well-sampled contexts.
+
+---
+
+## SAGE Reflection Engine
+
+After every trade, the Self-Adapting Generative Engine calls Groq (Gemini as primary, Groq as fallback) to reflect on recent performance and generate conditional playbook rules. These rules adjust ensemble strategy weights for the next cycle. The engine uses language model reasoning to identify why specific strategies are outperforming or underperforming in the current regime and injects that context into the AI trade narrative.
+
+---
+
+## On-Chain Integration (ERC-8004)
+
+Every signal — regardless of paper or live execution mode — produces an EIP-712 signed TradeIntent submitted to the Risk Router contract on Sepolia. This maintains a continuous on-chain activity record for the hackathon leaderboard. The agent claims sandbox capital from the Hackathon Vault on startup, verifies it has not double-claimed, and checks its on-chain mandate before trading any asset.
+
+Checkpoints are EIP-712 signed, pinned to IPFS via Pinata, and form a hash chain where each checkpoint references the prior hash. The chain can be verified locally with `npm run verify-checkpoints`.
 
 | Contract | Address |
 |----------|---------|
@@ -102,162 +84,51 @@ Self-Adapting Generative Engine: runs a Groq/Gemini reflection after each trade,
 | Reputation Registry | `0x423a9904e39537a9997fbaF0f220d79D7d545763` |
 | Validation Registry | `0x92bF63E5C7Ac6980f237a7164Ab413BE226187F1` |
 
-### Registration (one-time)
-
-```bash
-npm run register
-# Registers agent on ERC-8004 registry (mints ERC-721 NFT)
-# Claims hackathon vault sandbox capital
-# Saves agentId to agent-id.json
-```
-
----
-
-## Environment Variables
-
-```env
-# Wallet (Sepolia)
-PRIVATE_KEY=0x...                        # Your Sepolia wallet private key
-
-# Network
-RPC_URL=https://1rpc.io/sepolia
-CHAIN_ID=11155111
-
-# ERC-8004 Contracts (pre-filled for hackathon)
-AGENT_REGISTRY_ADDRESS=0x97b07dDc405B0c28B17559aFFE63BdB3632d0ca3
-HACKATHON_VAULT_ADDRESS=0x0E7CD8ef9743FEcf94f9103033a044caBD45fC90
-RISK_ROUTER_ADDRESS=0xd6A6952545FF6E6E6681c2d15C59f9EB8F40FdBC
-REPUTATION_REGISTRY_ADDRESS=0x423a9904e39537a9997fbaF0f220d79D7d545763
-AGENT_ID=19                              # Set after running npm run register
-
-# Kraken API (optional — paper mode works without it)
-KRAKEN_API_KEY=...
-KRAKEN_API_SECRET=...
-
-# AI / Reasoning
-GROQ_API_KEY=...                         # Groq API key (narrative + SAGE fallback)
-ANTHROPIC_API_KEY=...                    # Optional — primary AI reasoning chain
-
-# Execution
-EXECUTION_MODE=paper                     # paper | live | disabled
-TRADING_SYMBOLS=BTCUSD,ETHUSD,SOLUSD,XMRUSD,ATOMUSD,LINKUSD,DOGEUSD,PEPEUSD
-ALLOWED_ASSETS=BTC,ETH,SOL,XMR,ATOM,LINK,DOGE,PEPE   # Mandate whitelist
-CANDLE_INTERVAL=1                        # minutes
-MIN_CONFIDENCE=0.1                       # 0.0–1.0
-
-# Risk limits
-MAX_POSITIONS=15
-MAX_POSITION_PCT=5                       # % of equity per position
-MAX_DAILY_LOSS_PCT=3
-MAX_DRAWDOWN_PCT=10
-
-# Dashboard
-DASHBOARD_PORT=3000
-MCP_PORT=3001
-```
-
 ---
 
 ## Dashboard (PRISM)
 
-Live dashboard at `http://localhost:3000`:
+The live dashboard at [https://sentinel-v3-production.up.railway.app](https://sentinel-v3-production.up.railway.app) shows:
 
-- **Sidebar** — equity hero with sparkline graph, trust tier gradient card, dimension bars, SAGE status
-- **Hero Cards** — open positions, win rate, drawdown, uptime
-- **Signals Feed** — per-symbol strategy scores with symbol picker
-- **Narrative Card** — AI-generated trade rationale via Groq
-- **Positions Table** — live mark-to-market P&L with size, trust tier, slippage
-- **Governance Pipeline** — 6-stage visual driven by last checkpoint event type
-- **Decision Log** — IPFS checkpoint chain with integrity verification
-- **System Logs** — structured real-time feed with level badges (ERROR/WARN/INFO)
+- **Equity hero** with real-time sparkline from checkpoint history
+- **Trust tier card** with 4-dimension score bars and tier gradient
+- **Hero metrics** — open positions, win rate, drawdown, uptime
+- **Signal feed** — per-symbol strategy scores with symbol picker
+- **AI narrative card** — Groq-generated trade rationale for the last signal
+- **Positions table** — live mark-to-market P&L with size, trust tier, slippage
+- **Governance pipeline** — 6-stage visual driven by last checkpoint event type
+- **Decision log** — IPFS checkpoint chain with integrity status
+- **System logs** — structured real-time feed with ERROR/WARN/INFO level badges
 
 ---
 
 ## MCP Server
 
-The agent exposes an MCP (Model Context Protocol) server on port 3001 with 18 tools.
+The agent exposes a Model Context Protocol server on port 3001 with 18 tools. Any MCP-compatible LLM client can inspect and control the running agent in real time. Key tools: `get_agent_status`, `get_open_positions`, `get_recent_signals`, `get_risk_metrics`, `halt_agent`, `resume_agent`, `get_adaptation_summary`, `get_on_chain_summary`.
 
-See [MCP.md](MCP.md) for full tool reference.
-
-```bash
-npm run mcp    # Start MCP server standalone
-```
-
-Key tools: `get_agent_status`, `get_open_positions`, `get_recent_signals`, `get_risk_metrics`, `halt_agent`, `resume_agent`, `get_recent_logs`, `get_adaptation_summary`
+See [MCP.md](MCP.md) for the full tool reference.
 
 ---
 
-## Scripts
+## Quick Start
 
 ```bash
-npm run dev                  # Start agent (tsx, hot reload)
-npm run build                # Compile TypeScript
-npm run start                # Run compiled build
-npm run register             # Register agent on ERC-8004 (run once)
-npm run verify-checkpoints   # Verify IPFS checkpoint hash chain
-npm run demo-halt            # Demo emergency halt flow
+npm install
+cp .env.example .env        # fill in PRIVATE_KEY, AGENT_ID, API keys
+npm run dev                 # starts agent + dashboard (port 3000) + MCP (port 3001)
+```
+
+```bash
+npm run register            # register agent on-chain (run once)
+npm run verify-checkpoints  # verify IPFS checkpoint hash chain
+npm run demo-halt           # demo emergency halt flow
 ```
 
 ---
 
-## Project Structure
+## Technical Stack
 
-```
-sentinel-v3/
-├── src/
-│   ├── agent/
-│   │   ├── index.ts          # Main 6-stage pipeline + adaptive learning loop
-│   │   ├── config.ts         # All env var loading + defaults
-│   │   ├── logger.ts         # Structured logger {time,level,logger,msg}
-│   │   ├── state.ts          # Cycle state, equity persistence
-│   │   ├── scheduler.ts      # 60s cron loop
-│   │   ├── trade-log.ts      # Closed trade records + stats
-│   │   └── operator-control.ts # Pause/resume/halt controls
-│   ├── strategy/
-│   │   ├── ensemble.ts       # Runs all 3, confluence boost, picks best signal
-│   │   ├── order-block.ts    # ICT/SMC order block retest strategy
-│   │   ├── engulfing.ts      # Engulfing candle at key level
-│   │   ├── momentum.ts       # EMA crossover + MACD, regime-aware
-│   │   ├── regime.ts         # ADX + RSI + EMA slope regime classifier
-│   │   ├── adaptive-learning.ts  # CAGE bounded self-improvement engine
-│   │   ├── sage-engine.ts    # SAGE: Groq/Gemini reflection + playbook rules
-│   │   ├── ai-reasoning.ts   # Claude→Groq→template narrative chain
-│   │   ├── indicators.ts     # EMA, ATR, RSI, OB, FVG, BOS, sweeps
-│   │   └── types.ts
-│   ├── chain/
-│   │   ├── eip712.ts         # EIP-712 signing (TradeIntent + Checkpoint)
-│   │   ├── risk-router.ts    # Risk Router submission, vault claim
-│   │   ├── identity.ts       # ERC-8004 agent identity loading
-│   │   ├── agent-mandate.ts  # On-chain mandate evaluation (allowed assets)
-│   │   └── execution-simulator.ts # Slippage + net edge simulation gate
-│   ├── risk/
-│   │   ├── manager.ts        # Position sizing, SL/TP, trailing stop, 2h auto-close
-│   │   ├── circuit-breaker.ts
-│   │   └── volatility.ts
-│   ├── trust/
-│   │   ├── checkpoint.ts     # IPFS tamper-evident checkpoint chain
-│   │   ├── trust-scorecard.ts # 4-dimension trust score → tier → size factor
-│   │   └── artifact-emitter.ts
-│   ├── data/
-│   │   ├── kraken-bridge.ts  # REST API orders + full paper account
-│   │   ├── market.ts         # Candle + ticker fetching from Kraken
-│   │   └── sentiment-feed.ts # Fear & Greed + funding rate proxy
-│   ├── dashboard/
-│   │   ├── server.ts         # Express API server (status, trades, logs, checkpoints)
-│   │   ├── SentinelDashboard.jsx  # PRISM React UI (Babel in-browser)
-│   │   └── public/index.html
-│   ├── mcp/
-│   │   └── server.ts         # MCP JSON-RPC tool server (18 tools)
-│   ├── analytics/
-│   │   └── performance-metrics.ts
-│   └── security/
-│       └── oracle-integrity.ts
-├── scripts/
-│   ├── register-agent.ts     # ERC-8004 registration + vault claim
-│   └── verify-checkpoints.ts
-├── agent-id.json             # Persisted agentId after registration
-└── .env                      # Environment variables (git-ignored)
-```
+Built with TypeScript and Node.js, ethers.js v6 for EIP-712 signing and Sepolia contract interaction, and Express for the dashboard and MCP API. Market data is sourced from Kraken REST for candles and tickers, with an Alternative.me Fear & Greed proxy and funding rate model for sentiment. IPFS artifact storage uses Pinata. The PRISM dashboard is a React app with Babel in-browser transpilation. The MCP server uses a lightweight HTTP + JSON-RPC transport that reads live agent state from in-memory singletons on every tool call.
 
 ---
 
